@@ -1,4 +1,5 @@
 mod ffi;
+mod frame_graph;
 mod html_writer;
 mod model;
 mod record_data;
@@ -55,6 +56,15 @@ struct Args {
     /// Aggregate threads matching regex
     #[arg(long = "aggregate-threads")]
     aggregate_threads: Vec<String>,
+
+    /// Frame marker: "thread_pattern=func_substring"
+    /// Default: UE markers (GameThread, RHIThread, RenderThread)
+    #[arg(long = "frame-marker", alias = "frame_marker")]
+    frame_markers: Vec<String>,
+
+    /// Disable frame graph analysis
+    #[arg(long = "no-frame-graph", alias = "no_frame_graph")]
+    no_frame_graph: bool,
 }
 
 fn find_dll_dir() -> PathBuf {
@@ -110,6 +120,21 @@ fn run(args: Args) -> Result<()> {
     info!("DLL directory: {:?}", dll_dir);
 
     let mut record_data = record_data::RecordData::new();
+
+    // Configure frame graph.
+    record_data.frame_graph_enabled = !args.no_frame_graph;
+    for marker_str in &args.frame_markers {
+        if let Some((pattern, func)) = marker_str.split_once('=') {
+            record_data
+                .frame_markers
+                .push((pattern.to_string(), func.to_string()));
+        } else {
+            eprintln!(
+                "Warning: ignoring invalid --frame-marker '{}' (expected 'thread_pattern=func_substring')",
+                marker_str
+            );
+        }
+    }
 
     for record_file in &args.record_files {
         info!("Loading {}", record_file);

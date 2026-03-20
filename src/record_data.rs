@@ -5,6 +5,9 @@ use log::info;
 use serde::Serialize;
 
 use crate::ffi::ReportLib;
+use crate::frame_graph::{
+    self, FrameGraphEventInfo, ThreadSamples, TimedSample,
+};
 use crate::model::event_scope::{EventScope, EventScopeInfo};
 use crate::model::sets::{FunctionSet, LibSet};
 
@@ -23,6 +26,12 @@ pub struct RecordData {
     pub libs: LibSet,
     pub functions: FunctionSet,
     pub total_samples: u64,
+    /// Timed samples for frame graph: event_name → (pid, tid) → ThreadSamples.
+    pub timed_samples: HashMap<String, HashMap<(u32, u32), ThreadSamples>>,
+    /// Frame marker config: (thread_name_pattern, func_substring).
+    pub frame_markers: Vec<(String, String)>,
+    /// Whether frame graph analysis is enabled.
+    pub frame_graph_enabled: bool,
 }
 
 impl RecordData {
@@ -35,6 +44,9 @@ impl RecordData {
             libs: LibSet::new(),
             functions: FunctionSet::new(),
             total_samples: 0,
+            timed_samples: HashMap::new(),
+            frame_markers: Vec::new(),
+            frame_graph_enabled: true,
         }
     }
 
@@ -109,6 +121,24 @@ impl RecordData {
             }
 
             thread.add_callstack(sample.period, &callstack);
+
+            // Collect timed samples for frame graph analysis.
+            if self.frame_graph_enabled {
+                let func_ids: Vec<i64> = callstack.iter().map(|&(_, fid, _)| fid).collect();
+                let thread_samples = self
+                    .timed_samples
+                    .entry(raw_event.name.clone())
+                    .or_default()
+                    .entry((sample.pid, sample.tid))
+                    .or_insert_with(|| {
+                        ThreadSamples::new(sample.pid, sample.tid, sample.thread_comm.clone())
+                    });
+                thread_samples.samples.push(TimedSample {
+                    time: sample.time,
+                    period: sample.period,
+                    callstack_func_ids: func_ids,
+                });
+            }
         }
 
         // Update subtree event counts
@@ -226,6 +256,7 @@ impl RecordData {
         let lib_list = self.gen_lib_list();
         let function_map = self.gen_function_map();
         let sample_info = self.gen_sample_info();
+        let frame_graph_data = self.gen_frame_graph_data();
 
         RecordInfo {
             record_time,
@@ -253,6 +284,7 @@ impl RecordData {
             function_map,
             sample_info,
             source_files: Vec::new(),
+            frame_graph_data,
         }
     }
 
@@ -305,6 +337,98 @@ impl RecordData {
     fn gen_sample_info(&self) -> Vec<EventScopeInfo> {
         self.events.values().map(|e| e.get_sample_info()).collect()
     }
+
+    /// Generate frame graph data from collected timed samples.
+    pub fn gen_frame_graph_data(&self) -> Vec<FrameGraphEventInfo> {
+        if !self.frame_graph_enabled {
+            return Vec::new();
+        }
+
+        let markers = if self.frame_markers.is_empty() {
+            frame_graph::DEFAULT_MARKERS
+                .iter()
+                .map(|&(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        } else {
+            self.frame_markers.clone()
+        };
+
+        let get_name = |func_id: i64| -> String { self.functions.get_func_name(func_id) };
+        let all_func_ids = self.functions.all_func_ids();
+
+        let mut result = Vec::new();
+
+        for (event_name, threads_map) in &self.timed_samples {
+            let mut threads_info = Vec::new();
+
+            for ((_pid, _tid), thread_samples) in threads_map {
+                // Match this thread against marker configs.
+                for (pattern, func_substr) in &markers {
+                    if !thread_samples.thread_name.contains(pattern.as_str()) {
+                        continue;
+                    }
+
+                    // Find marker function ID.
+                    let marker_fid =
+                        match frame_graph::find_marker_func_id(&all_func_ids, func_substr, &get_name)
+                        {
+                            Some(fid) => fid,
+                            None => continue,
+                        };
+
+                    // Samples should already be in time order from perf.data iteration.
+                    // Sort to be safe.
+                    let mut sorted_samples: Vec<&TimedSample> =
+                        thread_samples.samples.iter().collect();
+                    sorted_samples.sort_by_key(|s| s.time);
+
+                    // Build owned vec for analyze_frames.
+                    let samples_ref: Vec<TimedSample> = sorted_samples
+                        .iter()
+                        .map(|s| TimedSample {
+                            time: s.time,
+                            period: s.period,
+                            callstack_func_ids: s.callstack_func_ids.clone(),
+                        })
+                        .collect();
+
+                    let frames = frame_graph::analyze_frames(&samples_ref, marker_fid);
+                    if frames.is_empty() {
+                        continue;
+                    }
+
+                    let marker_name = get_name(marker_fid);
+                    info!(
+                        "FrameGraph: {} thread '{}' marker '{}' => {} frames",
+                        event_name,
+                        thread_samples.thread_name,
+                        marker_name,
+                        frames.len()
+                    );
+
+                    threads_info.push(frame_graph::FrameGraphThreadInfo {
+                        pid: thread_samples.pid,
+                        tid: thread_samples.tid,
+                        thread_name: thread_samples.thread_name.clone(),
+                        marker_func: marker_name,
+                        marker_func_id: marker_fid,
+                        frames,
+                    });
+
+                    break; // Only first matching marker per thread.
+                }
+            }
+
+            if !threads_info.is_empty() {
+                result.push(FrameGraphEventInfo {
+                    event_name: event_name.clone(),
+                    threads: threads_info,
+                });
+            }
+        }
+
+        result
+    }
 }
 
 #[derive(Serialize)]
@@ -341,4 +465,6 @@ pub struct RecordInfo {
     pub sample_info: Vec<EventScopeInfo>,
     #[serde(rename = "sourceFiles")]
     pub source_files: Vec<serde_json::Value>,
+    #[serde(rename = "frameGraphData", skip_serializing_if = "Vec::is_empty")]
+    pub frame_graph_data: Vec<FrameGraphEventInfo>,
 }

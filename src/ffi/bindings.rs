@@ -68,6 +68,7 @@ pub struct Sample {
     pub pid: u32,
     pub tid: u32,
     pub thread_comm: String,
+    pub time: u64,
     pub period: u64,
 }
 
@@ -287,6 +288,7 @@ impl ReportLib {
             pid: s.pid,
             tid: s.tid,
             thread_comm: unsafe { ptr_to_string(s.thread_comm) },
+            time: s.time,
             period: s.period,
         })
     }

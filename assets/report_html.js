@@ -1440,7 +1440,7 @@ class FlameGraphView {
         this.svg.find('.search').css('cursor', 'pointer').click(() => {
             let term = prompt('Search for:', '');
             if (!term) {
-                this.svg.find('g > rect').each(function() {
+                this.svg.find('g > rect[ofill]').each(function() {
                     this.attributes['fill'].value = this.attributes['ofill'].value;
                 });
             } else {
@@ -1699,6 +1699,648 @@ class DisassemblyView {
 }
 
 
+// FrameGraph tab: show per-frame analysis with good/bad frame classification.
+class FrameGraphTab {
+    init(div) {
+        this.div = div;
+    }
+
+    draw() {
+        this.div.empty();
+        // Target FPS control
+        let controlDiv = $('<div class="ml-3 mt-2 mb-2">').appendTo(this.div);
+        controlDiv.append('<label class="mr-2"><b>Target FPS:</b></label>');
+        let fpsInput = $('<input type="number" value="60" min="1" max="240" style="width:80px" class="form-control d-inline-block">');
+        fpsInput.appendTo(controlDiv);
+        this.targetFps = 60;
+        this.views = [];
+
+        fpsInput.on('change', () => {
+            let val = parseInt(fpsInput.val());
+            if (val > 0 && val <= 240) {
+                this.targetFps = val;
+                for (let view of this.views) {
+                    view.updateTargetFps(this.targetFps);
+                }
+            }
+        });
+
+        // Create one FrameGraphView per thread across all events.
+        for (let eventData of gFrameGraphData) {
+            for (let threadData of eventData.threads) {
+                let title = `${eventData.eventName} — ${threadData.threadName} ` +
+                            `(pid:${threadData.pid} tid:${threadData.tid}) ` +
+                            `marker: ${threadData.markerFunc} — ${threadData.frames.length} frames`;
+                let view = new FrameGraphView(this.div, title, threadData, this.targetFps);
+                view.draw();
+                this.views.push(view);
+            }
+        }
+    }
+}
+
+// Render a flamegraph-like view colored by frame analysis deltas.
+class FrameGraphView {
+    constructor(divContainer, title, threadData, targetFps) {
+        this.id = createId();
+        this.div = $('<div>', {id: this.id, style: 'font-family: Monospace; font-size: 12px'});
+        this.div.appendTo(divContainer);
+        this.title = title;
+        this.threadData = threadData;
+        this.targetFps = targetFps;
+        this.frames = threadData.frames; // [[total_period, [fid, self, subtree, ...]], ...]
+        this.svgNodeHeight = 32;
+    }
+
+    draw() {
+        this.div.empty();
+        this._computeStats();
+        this._render();
+    }
+
+    updateTargetFps(fps) {
+        this.targetFps = fps;
+        this._computeStats();
+        this._render();
+    }
+
+    _computeStats() {
+        let frameBudget = 1e9 / this.targetFps; // ns
+        this.goodFrames = [];
+        this.badFrames = [];
+
+        for (let frame of this.frames) {
+            let totalPeriod = frame[0];
+            if (totalPeriod <= frameBudget) {
+                this.goodFrames.push(frame);
+            } else {
+                this.badFrames.push(frame);
+            }
+        }
+
+        // Build per-function aggregated stats across all frames.
+        // funcStats: Map<funcId, {totalSubtree, goodSubtreeSum, goodCount, badSubtreeSum, badCount,
+        //                         minFrame, maxFrame, frameValues: [{frameIdx, valueMs}]}>
+        this.funcStats = new Map();
+        let self_ = this;
+
+        function processFrame(frame, isBad, frameIdx) {
+            let d = frame[1]; // [fid, self, subtree, fid, self, subtree, ...]
+            for (let i = 0; i < d.length; i += 3) {
+                let fid = d[i];
+                let selfNs = d[i+1];
+                let subtreeNs = d[i+2];
+                let stat = self_.funcStats.get(fid);
+                if (!stat) {
+                    stat = {totalSubtree: 0, goodSubtreeSum: 0, goodCount: 0,
+                            badSubtreeSum: 0, badCount: 0, minFrame: Infinity, maxFrame: 0,
+                            frameValues: []};
+                    self_.funcStats.set(fid, stat);
+                }
+                stat.totalSubtree += subtreeNs;
+                let frameTotalNs = frame[0];
+                let ratio = frameTotalNs > 0 ? subtreeNs / frameTotalNs : 0;
+                stat.frameValues.push({frameIdx: frameIdx, valueMs: subtreeNs / 1e6, ratio: ratio});
+                if (isBad) {
+                    stat.badSubtreeSum += subtreeNs;
+                    stat.badCount++;
+                } else {
+                    stat.goodSubtreeSum += subtreeNs;
+                    stat.goodCount++;
+                }
+                if (subtreeNs < stat.minFrame) stat.minFrame = subtreeNs;
+                if (subtreeNs > stat.maxFrame) stat.maxFrame = subtreeNs;
+            }
+        }
+
+        for (let i = 0; i < this.frames.length; i++) {
+            let frame = this.frames[i];
+            let isBad = frame[0] > frameBudget;
+            processFrame(frame, isBad, i);
+        }
+
+        // Compute delta, CV, and max CV for color scaling.
+        this.maxCv = 0;
+        for (let [fid, stat] of this.funcStats) {
+            let avgBad = stat.badCount > 0 ? stat.badSubtreeSum / stat.badCount : 0;
+            let avgGood = stat.goodCount > 0 ? stat.goodSubtreeSum / stat.goodCount : 0;
+            stat.delta = avgBad - avgGood;
+
+            // Compute avg, median, stddev from absolute frameValues (ns).
+            let vals = stat.frameValues.map(fv => fv.valueMs * 1e6); // back to ns for consistency
+            let n = vals.length;
+            let sum = 0;
+            for (let v of vals) sum += v;
+            stat.avg = sum / n;
+
+            let sorted = vals.slice().sort((a, b) => a - b);
+            if (n % 2 === 1) {
+                stat.median = sorted[Math.floor(n / 2)];
+            } else {
+                stat.median = (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+            }
+
+            let sqSum = 0;
+            for (let v of vals) { let d = v - stat.avg; sqSum += d * d; }
+            stat.stddev = Math.sqrt(sqSum / n);
+
+            // CV based on frame-time ratio (subtreeNs/frameTotalNs) to eliminate
+            // frame duration variation — only captures true instability.
+            let ratios = stat.frameValues.map(fv => fv.ratio);
+            let rSum = 0;
+            for (let r of ratios) rSum += r;
+            let rAvg = rSum / ratios.length;
+            let rSqSum = 0;
+            for (let r of ratios) { let d = r - rAvg; rSqSum += d * d; }
+            let rStddev = Math.sqrt(rSqSum / ratios.length);
+            stat.cv = rAvg > 0 ? rStddev / rAvg : 0;
+            if (stat.cv > this.maxCv) this.maxCv = stat.cv;
+        }
+    }
+
+    _getDeltaColor(funcId) {
+        let stat = this.funcStats.get(funcId);
+        if (!stat || this.maxCv <= 0 || stat.cv <= 0) {
+            // Neutral: light gray-blue
+            return {r: 200, g: 210, b: 230};
+        }
+        let intensity = Math.min(1.0, stat.cv / this.maxCv);
+        // Interpolate from light gray-blue (200,210,230) to deep red (220,60,60)
+        let r = Math.floor(200 + 20 * intensity);
+        let g = Math.floor(210 - 150 * intensity);
+        let b = Math.floor(230 - 170 * intensity);
+        return {r, g, b};
+    }
+
+    _render() {
+        this.div.empty();
+
+        let frameBudgetMs = (1000 / this.targetFps).toFixed(2);
+        let totalFrames = this.frames.length;
+        let goodCount = this.goodFrames.length;
+        let badCount = this.badFrames.length;
+
+        this.div.append(`<p><b>${this.title}</b></p>`);
+        this.div.append(`<p class="ml-3">Total frames: ${totalFrames} | ` +
+            `Good: ${goodCount} (≤${frameBudgetMs}ms) | ` +
+            `Bad: <span style="color:red">${badCount}</span> (&gt;${frameBudgetMs}ms)</p>`);
+
+        if (totalFrames === 0) {
+            this.div.append('<p class="ml-3 text-muted">No frames detected.</p>');
+            return;
+        }
+
+        // Use the call tree from sampleInfo to get the flamegraph structure.
+        // Find the matching thread in sampleInfo.
+        let callTree = this._findCallTree();
+        if (!callTree) {
+            this.div.append('<p class="ml-3 text-muted">No matching call tree found in sample data.</p>');
+            return;
+        }
+
+        // Compute total subtree for width calculation.
+        this.sumCount = 0;
+        for (let node of callTree) {
+            this.sumCount += node.s;
+        }
+
+        this.maxDepth = this._getMaxDepth(callTree);
+        this.svgHeight = this.svgNodeHeight * (this.maxDepth + 3);
+        this.svgStr = [];
+
+        // Render SVG.
+        this.svgStr.push(`
+            <div style="width: 100%; height: ${this.svgHeight}px;">
+                <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+                    version="1.1" width="100%" height="100%" style="border: 1px solid black;">
+                    <defs><linearGradient id="fg_bg_${this.id}" y1="0" y2="1" x1="0" x2="0">
+                        <stop stop-color="#eeeeff" offset="5%"/>
+                        <stop stop-color="#e0e0f0" offset="90%"/>
+                    </linearGradient></defs>
+                    <rect x="0" y="0" width="100%" height="100%" fill="url(#fg_bg_${this.id})"/>`);
+
+        // Render nodes.
+        let fakeNodes = [{c: callTree}];
+        let children = this._splitChildrenForNodes(fakeNodes);
+        let xOffset = 0;
+        for (let child of children) {
+            xOffset = this._renderNode(child, 0, xOffset);
+        }
+
+        // Unzoom, info, search controls.
+        this.svgStr.push(`<rect id="fg_zoom_rect_${this.id}" style="display:none;stroke:rgb(0,0,0);"
+            rx="10" ry="10" x="10" y="10" width="80" height="30" fill="rgb(255,255,255)"/>
+            <text id="fg_zoom_text_${this.id}" x="19" y="30" style="display:none">Zoom out</text>`);
+
+        this.svgStr.push(`<clipPath id="fg_info_clip_${this.id}">
+            <rect rx="10" ry="10" x="120" y="10" width="789" height="30" fill="rgb(255,255,255)"/>
+            </clipPath>
+            <rect style="stroke:rgb(0,0,0);" rx="10" ry="10" x="120" y="10" width="799" height="30" fill="rgb(255,255,255)"/>
+            <text clip-path="url(#fg_info_clip_${this.id})" id="fg_info_text_${this.id}" x="128" y="30"></text>`);
+
+        this.svgStr.push(`<rect style="stroke:rgb(0,0,0);" rx="10" ry="10" x="934" y="10" width="150" height="30" fill="rgb(255,255,255)"/>
+            <text id="fg_percent_text_${this.id}" text-anchor="end" x="1074" y="30"></text>`);
+
+        this.svgStr.push(`<rect style="stroke:rgb(0,0,0);" rx="10" ry="10" x="1150" y="10" width="80" height="30"
+            fill="rgb(255,255,255)" class="fg-search"/>
+            <text x="1160" y="30" class="fg-search">Search</text>`);
+
+        this.svgStr.push('</svg></div>');
+
+        this.div.append(this.svgStr.join(''));
+        this.svgStr = [];
+        this.svgDiv = this.div.children().last();
+        this.svg = this.svgDiv.find('svg');
+        this.div.append('<br/>');
+
+        this._adjustTextSize();
+        this._enableZoom();
+        this._enableInfo();
+        this._enableSearch();
+        this._enableChartButtons();
+        this._adjustTextSizeOnResize();
+    }
+
+    _findCallTree() {
+        // Find matching thread in sampleInfo by pid/tid.
+        for (let eventInfo of gSampleInfo) {
+            for (let process of eventInfo.processes) {
+                for (let thread of process.threads) {
+                    if (thread.tid === this.threadData.tid) {
+                        return thread.g.c;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    _getYForDepth(depth) {
+        return this.svgHeight - (depth + 1) * this.svgNodeHeight;
+    }
+
+    _getWidthPercentage(eventCount) {
+        return eventCount * 100.0 / this.sumCount;
+    }
+
+    _getMaxDepth(nodes) {
+        let isArray = Array.isArray(nodes);
+        let sumCount = isArray ? nodes.reduce((a, c) => a + c.s, 0) : nodes.s;
+        let width = this._getWidthPercentage(sumCount);
+        if (width < 0.1) return 0;
+        let children = isArray ? this._splitChildrenForNodes(nodes) : nodes.c;
+        let childDepth = 0;
+        for (let child of children) {
+            childDepth = Math.max(childDepth, this._getMaxDepth(child));
+        }
+        return childDepth + 1;
+    }
+
+    _splitChildrenForNodes(nodes) {
+        let map = new Map();
+        for (let node of nodes) {
+            for (let child of node.c) {
+                let funcName = getFuncName(child.f);
+                let subNodes = map.get(funcName);
+                if (subNodes) {
+                    subNodes.push(child);
+                } else {
+                    map.set(funcName, [child]);
+                }
+            }
+        }
+        const funcNames = [...map.keys()].sort();
+        let res = [];
+        funcNames.forEach(funcName => {
+            const subNodes = map.get(funcName);
+            res.push(subNodes.length === 1 ? subNodes[0] : subNodes);
+        });
+        return res;
+    }
+
+    _renderNode(nodes, depth, xOffset) {
+        let x = xOffset;
+        let y = this._getYForDepth(depth);
+        let isArray = Array.isArray(nodes);
+        let funcId = isArray ? nodes[0].f : nodes.f;
+        let sumCount = isArray ? nodes.reduce((a, c) => a + c.s, 0) : nodes.s;
+        let width = this._getWidthPercentage(sumCount);
+        if (width < 0.1) return xOffset;
+
+        let color = this._getDeltaColor(funcId);
+        let borderColor = {};
+        for (let key in color) {
+            borderColor[key] = Math.max(0, color[key] - 50);
+        }
+
+        let funcName = getFuncName(funcId);
+        let libName = getLibNameOfFunction(funcId);
+        let stat = this.funcStats.get(funcId);
+        let tooltip = funcName + ' | ' + libName;
+        if (stat) {
+            let minMs = (stat.minFrame / 1e6).toFixed(3);
+            let maxMs = (stat.maxFrame / 1e6).toFixed(3);
+            let deltaMs = (stat.delta / 1e6).toFixed(3);
+            tooltip += ` | min: ${minMs}ms | max: ${maxMs}ms | \u0394bad: ${deltaMs}ms`;
+        }
+
+        this.svgStr.push(`<g data-fid="${funcId}"><title>${tooltip}</title><rect x="${x}%" y="${y}" ox="${x}"
+            depth="${depth}" width="${width}%" owidth="${width}" height="28.0"
+            ofill="rgb(${color.r},${color.g},${color.b})"
+            fill="rgb(${color.r},${color.g},${color.b})"
+            style="stroke:rgb(${borderColor.r},${borderColor.g},${borderColor.b})"/>
+            <rect class="chart-btn" x="0" y="${y+2}" width="14" height="24"
+                rx="2" fill="rgba(0,0,0,0.15)" style="cursor:pointer;display:none"/>
+            <text class="chart-icon" x="0" y="${y+18}"
+                style="font-size:14px;pointer-events:none;display:none">📈</text>
+            <text class="fn" x="${x}%" y="${y + 12}"></text>
+            <text class="st" x="${x}%" y="${y + 24}"></text></g>`);
+
+        let children = isArray ? this._splitChildrenForNodes(nodes) : nodes.c;
+        let childXOffset = xOffset;
+        for (let child of children) {
+            childXOffset = this._renderNode(child, depth + 1, childXOffset);
+        }
+        return xOffset + width;
+    }
+
+    _adjustTextSizeForNode(g) {
+        let fnText = g.find('text.fn');
+        let stText = g.find('text.st');
+        let chartBtn = g.find('rect.chart-btn');
+        let chartIcon = g.find('text.chart-icon');
+        let mainRect = g.find('rect').first();
+        let width = parseFloat(mainRect.attr('width')) * this.svgWidth * 0.01;
+        if (width < 28) {
+            fnText.text(''); stText.text('');
+            chartBtn.css('display', 'none'); chartIcon.css('display', 'none');
+            return;
+        }
+
+        let methodName = g.find('title').text().split(' | ')[0];
+        let fid = parseInt(g.attr('data-fid'));
+        let stat = this.funcStats.get(fid);
+
+        // Show chart button if wide enough.
+        let btnWidth = 0;
+        if (width > 50 && stat && stat.frameValues.length > 1) {
+            let rectXPct = parseFloat(mainRect.attr('x'));
+            let rectXPx = rectXPct * this.svgWidth * 0.01;
+            let rectY = parseFloat(mainRect.attr('y'));
+            // Position button at right edge of the node (pixel coordinates).
+            let btnX = rectXPx + width - 16;
+            chartBtn.attr('x', btnX).attr('y', rectY + 2).css('display', 'block');
+            chartIcon.attr('x', btnX + 1).attr('y', rectY + 18).css('display', 'block');
+            btnWidth = 18;
+        } else {
+            chartBtn.css('display', 'none'); chartIcon.css('display', 'none');
+        }
+
+        let textWidth = width - btnWidth;
+
+        // Build stats string.
+        let statsStr = '';
+        if (stat) {
+            let minMs = (stat.minFrame / 1e6).toFixed(2);
+            let maxMs = (stat.maxFrame / 1e6).toFixed(2);
+            let avgMs = (stat.avg / 1e6).toFixed(2);
+            let medMs = (stat.median / 1e6).toFixed(2);
+            let sdMs = (stat.stddev / 1e6).toFixed(2);
+            statsStr = `min:${minMs}  max:${maxMs}  avg:${avgMs}  med:${medMs}  \u03C3:${sdMs} (ms)`;
+        }
+
+        // Try single line: funcName + stats together.
+        if (statsStr) {
+            let combined = methodName + '  ' + statsStr;
+            if (combined.length * 7.5 <= textWidth) {
+                fnText.text(combined);
+                stText.text('');
+                return;
+            }
+        }
+
+        // Won't fit on one line — truncate funcName for line 1.
+        let numChars;
+        for (numChars = methodName.length; numChars > 4; numChars--) {
+            if (numChars * 7.5 <= textWidth) break;
+        }
+        fnText.text(numChars === methodName.length ? methodName : methodName.substring(0, numChars - 2) + '..');
+
+        // Line 2: stats (full or short depending on width).
+        if (!statsStr || textWidth < 120) {
+            stText.text('');
+            return;
+        }
+        let statsChars = statsStr.length;
+        if (statsChars * 7.5 <= textWidth) {
+            stText.text(statsStr);
+        } else {
+            // Short version.
+            let minMs = (stat.minFrame / 1e6).toFixed(2);
+            let maxMs = (stat.maxFrame / 1e6).toFixed(2);
+            let avgMs = (stat.avg / 1e6).toFixed(2);
+            let shortStr = `min:${minMs} max:${maxMs} avg:${avgMs}`;
+            if (shortStr.length * 7.5 <= textWidth) {
+                stText.text(shortStr);
+            } else {
+                stText.text('');
+            }
+        }
+    }
+
+    _adjustTextSize() {
+        this.svgWidth = $(window).width();
+        let self_ = this;
+        this.svg.find('g').each(function(_, g) { self_._adjustTextSizeForNode($(g)); });
+    }
+
+    _enableZoom() {
+        this.zoomStack = [null];
+        this.svg.find('g').css('cursor', 'pointer').click(zoom);
+        this.svg.find(`#fg_zoom_rect_${this.id}`).css('cursor', 'pointer').click(unzoom);
+        this.svg.find(`#fg_zoom_text_${this.id}`).css('cursor', 'pointer').click(unzoom);
+
+        let self_ = this;
+        function zoom() {
+            self_.zoomStack.push(this);
+            displayFromElement(this);
+            self_.svg.find(`#fg_zoom_rect_${self_.id}`).css('display', 'block');
+            self_.svg.find(`#fg_zoom_text_${self_.id}`).css('display', 'block');
+        }
+        function unzoom() {
+            if (self_.zoomStack.length > 1) {
+                self_.zoomStack.pop();
+                displayFromElement(self_.zoomStack[self_.zoomStack.length - 1]);
+                if (self_.zoomStack.length === 1) {
+                    self_.svg.find(`#fg_zoom_rect_${self_.id}`).css('display', 'none');
+                    self_.svg.find(`#fg_zoom_text_${self_.id}`).css('display', 'none');
+                }
+            }
+        }
+        function displayFromElement(g) {
+            let clickedOriginX = 0, clickedDepth = 0, clickedOriginWidth = 100, scaleFactor = 1;
+            if (g) {
+                g = $(g);
+                let clickedRect = g.find('rect');
+                clickedOriginX = parseFloat(clickedRect.attr('ox'));
+                clickedDepth = parseInt(clickedRect.attr('depth'));
+                clickedOriginWidth = parseFloat(clickedRect.attr('owidth'));
+                scaleFactor = 100.0 / clickedOriginWidth;
+            }
+            self_.svg.find('g').each(function(_, g) {
+                g = $(g);
+                let fnText = g.find('text.fn');
+                let stText = g.find('text.st');
+                let chartBtn = g.find('rect.chart-btn');
+                let chartIcon = g.find('text.chart-icon');
+                let rect = g.find('rect').first();
+                let depth = parseInt(rect.attr('depth'));
+                let ox = parseFloat(rect.attr('ox'));
+                let owidth = parseFloat(rect.attr('owidth'));
+                if (depth < clickedDepth || ox < clickedOriginX - 1e-9 ||
+                    ox + owidth > clickedOriginX + clickedOriginWidth + 1e-9) {
+                    rect.css('display', 'none');
+                    fnText.css('display', 'none');
+                    stText.css('display', 'none');
+                    chartBtn.css('display', 'none');
+                    chartIcon.css('display', 'none');
+                } else {
+                    rect.css('display', 'block');
+                    fnText.css('display', 'block');
+                    stText.css('display', 'block');
+                    let nx = (ox - clickedOriginX) * scaleFactor + '%';
+                    let ny = self_._getYForDepth(depth - clickedDepth);
+                    rect.attr('x', nx); rect.attr('y', ny);
+                    rect.attr('width', owidth * scaleFactor + '%');
+                    fnText.attr('x', nx); fnText.attr('y', ny + 12);
+                    stText.attr('x', nx); stText.attr('y', ny + 24);
+                    self_._adjustTextSizeForNode(g);
+                }
+            });
+        }
+    }
+
+    _enableInfo() {
+        this.selected = null;
+        let self_ = this;
+        this.svg.find('g').on('mouseenter', function() {
+            if (self_.selected) self_.selected.css('stroke-width', '0');
+            let g = $(this);
+            self_.selected = g;
+            g.css('stroke', 'black').css('stroke-width', '0.5');
+            let title = g.find('title').text();
+            let parts = title.split(' | ');
+            self_.svg.find(`#fg_info_text_${self_.id}`).text(parts[0]);
+            // Show delta info in percent area.
+            let deltaInfo = parts.length >= 4 ? parts.slice(2).join(' | ') : '';
+            self_.svg.find(`#fg_percent_text_${self_.id}`).text(deltaInfo);
+        });
+    }
+
+    _enableSearch() {
+        this.svg.find('.fg-search').css('cursor', 'pointer').click(() => {
+            let term = prompt('Search for:', '');
+            if (!term) {
+                this.svg.find('g > rect[ofill]').each(function() {
+                    this.attributes['fill'].value = this.attributes['ofill'].value;
+                });
+            } else {
+                this.svg.find('g').each(function() {
+                    let title = this.getElementsByTagName('title')[0];
+                    let rect = this.getElementsByTagName('rect')[0];
+                    if (title.textContent.indexOf(term) !== -1) {
+                        rect.attributes['fill'].value = 'rgb(230,100,230)';
+                    } else {
+                        rect.attributes['fill'].value = rect.attributes['ofill'].value;
+                    }
+                });
+            }
+        });
+    }
+
+    _adjustTextSizeOnResize() {
+        let self_ = this;
+        function throttle(callback) {
+            let running = false;
+            return function() {
+                if (!running) {
+                    running = true;
+                    window.requestAnimationFrame(function() {
+                        callback();
+                        running = false;
+                    });
+                }
+            };
+        }
+        $(window).resize(throttle(() => self_._adjustTextSize()));
+    }
+
+    _enableChartButtons() {
+        let self_ = this;
+        this.svg.find('rect.chart-btn').click(function(e) {
+            e.stopPropagation();
+            let g = $(this).closest('g');
+            let fid = parseInt(g.attr('data-fid'));
+            self_._showFrameChart(fid);
+        });
+    }
+
+    _showFrameChart(funcId) {
+        let stat = this.funcStats.get(funcId);
+        if (!stat) return;
+        let funcName = getFuncName(funcId);
+
+        // Remove existing overlay.
+        this.div.find('.frame-chart-overlay').remove();
+
+        // Build overlay.
+        let overlay = $('<div>', {class: 'frame-chart-overlay'})
+            .css({position:'fixed', top:'10%', left:'10%', width:'80%', height:'70%',
+                  background:'white', border:'2px solid #333', borderRadius:'8px',
+                  zIndex:9999, padding:'12px', boxShadow:'0 4px 20px rgba(0,0,0,0.3)'});
+
+        let header = $('<div>').css({display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'8px'});
+        header.append($('<b>').text(funcName));
+        header.append($('<button>').text('\u2715').css({border:'none', background:'none', fontSize:'18px', cursor:'pointer'})
+            .click(() => overlay.remove()));
+        overlay.append(header);
+
+        let chartDiv = $('<div>').css({width:'100%', height:'calc(100% - 40px)'});
+        overlay.append(chartDiv);
+        this.div.append(overlay);
+
+        // Sort by frameIdx for correct ordering.
+        let sorted = stat.frameValues.slice().sort((a, b) => a.frameIdx - b.frameIdx);
+
+        let data = new google.visualization.DataTable();
+        data.addColumn('number', 'Frame');
+        data.addColumn('number', 'ms');
+        for (let fv of sorted) {
+            data.addRow([fv.frameIdx, fv.valueMs]);
+        }
+        let chart = new google.visualization.LineChart(chartDiv[0]);
+        chart.draw(data, {
+            title: funcName + ' \u2014 Per-Frame Execution Time',
+            hAxis: {title: 'Frame'},
+            vAxis: {title: 'ms'},
+            legend: 'none',
+            pointSize: 1,
+            lineWidth: 1,
+            chartArea: {left:60, top:40, right:20, bottom:40}
+        });
+
+        // ESC to close.
+        let escHandler = function(e) {
+            if (e.key === 'Escape') {
+                overlay.remove();
+                $(document).off('keydown', escHandler);
+            }
+        };
+        $(document).on('keydown', escHandler);
+    }
+}
+
+
 function initGlobalObjects() {
     let recordData = $('#record_data').text();
     gRecordInfo = JSON.parse(recordData);
@@ -1708,6 +2350,7 @@ function initGlobalObjects() {
     gFunctionMap = gRecordInfo.functionMap;
     gSampleInfo = gRecordInfo.sampleInfo;
     gSourceFiles = gRecordInfo.sourceFiles;
+    gFrameGraphData = gRecordInfo.frameGraphData || [];
 }
 
 function createTabs() {
@@ -1715,6 +2358,9 @@ function createTabs() {
     gTabs.addTab('Chart Statistics', new ChartStatTab());
     gTabs.addTab('Sample Table', new SampleTableTab());
     gTabs.addTab('Flamegraph', new FlameGraphTab());
+    if (gFrameGraphData.length > 0) {
+        gTabs.addTab('FrameGraph', new FrameGraphTab());
+    }
 }
 
 // Global draw objects
@@ -1729,6 +2375,7 @@ let gLibList;
 let gFunctionMap;
 let gSampleInfo;
 let gSourceFiles;
+let gFrameGraphData;
 
 function updateProgress(text, progress) {
     return () => gProgressBar.updateAsync(text, progress);

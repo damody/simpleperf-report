@@ -110,4 +110,8 @@ impl FunctionSet {
         ids.sort();
         ids
     }
+
+    pub fn all_func_ids(&self) -> Vec<i64> {
+        self.id_to_func.keys().copied().collect()
+    }
 }

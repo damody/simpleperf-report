@@ -133,10 +133,16 @@ impl RecordData {
                     .or_insert_with(|| {
                         ThreadSamples::new(sample.pid, sample.tid, sample.thread_comm.clone())
                     });
+                let sample_type = if raw_event.name == "sched:sched_switch" {
+                    frame_graph::SampleType::OffCpu
+                } else {
+                    frame_graph::SampleType::OnCpu
+                };
                 thread_samples.samples.push(TimedSample {
                     time: sample.time,
                     period: sample.period,
                     callstack_func_ids: func_ids,
+                    sample_type,
                 });
             }
         }
@@ -356,19 +362,30 @@ impl RecordData {
         let get_name = |func_id: i64| -> String { self.functions.get_func_name(func_id) };
         let all_func_ids = self.functions.all_func_ids();
 
+        // Check if both cpu-cycles and sched:sched_switch are present.
+        let has_cpu_cycles = self.timed_samples.contains_key("cpu-cycles");
+        let has_sched_switch = self.timed_samples.contains_key("sched:sched_switch");
+
         let mut result = Vec::new();
 
+        if has_cpu_cycles && has_sched_switch {
+            // Generate combined wall-clock frame graph.
+            let combined = self.gen_combined_frame_graph(&markers, &get_name, &all_func_ids);
+            if let Some(event_info) = combined {
+                result.push(event_info);
+            }
+        }
+
+        // Also generate per-event frame graphs (original logic).
         for (event_name, threads_map) in &self.timed_samples {
             let mut threads_info = Vec::new();
 
             for ((_pid, _tid), thread_samples) in threads_map {
-                // Match this thread against marker configs.
                 for (pattern, func_substr) in &markers {
                     if !thread_samples.thread_name.contains(pattern.as_str()) {
                         continue;
                     }
 
-                    // Find marker function ID.
                     let marker_fid =
                         match frame_graph::find_marker_func_id(&all_func_ids, func_substr, &get_name)
                         {
@@ -376,19 +393,17 @@ impl RecordData {
                             None => continue,
                         };
 
-                    // Samples should already be in time order from perf.data iteration.
-                    // Sort to be safe.
                     let mut sorted_samples: Vec<&TimedSample> =
                         thread_samples.samples.iter().collect();
                     sorted_samples.sort_by_key(|s| s.time);
 
-                    // Build owned vec for analyze_frames.
                     let samples_ref: Vec<TimedSample> = sorted_samples
                         .iter()
                         .map(|s| TimedSample {
                             time: s.time,
                             period: s.period,
                             callstack_func_ids: s.callstack_func_ids.clone(),
+                            sample_type: s.sample_type.clone(),
                         })
                         .collect();
 
@@ -415,7 +430,7 @@ impl RecordData {
                         frames,
                     });
 
-                    break; // Only first matching marker per thread.
+                    break;
                 }
             }
 
@@ -428,6 +443,92 @@ impl RecordData {
         }
 
         result
+    }
+
+    /// Generate a combined cpu-cycles + sched:sched_switch frame graph with wall-clock timing.
+    fn gen_combined_frame_graph<F>(
+        &self,
+        markers: &[(String, String)],
+        get_name: &F,
+        all_func_ids: &[i64],
+    ) -> Option<FrameGraphEventInfo>
+    where
+        F: Fn(i64) -> String,
+    {
+        let cpu_threads = self.timed_samples.get("cpu-cycles")?;
+        let sched_threads = self.timed_samples.get("sched:sched_switch")?;
+
+        let mut threads_info = Vec::new();
+
+        for (&(pid, tid), cpu_thread_samples) in cpu_threads {
+            // Match this thread against marker configs.
+            for (pattern, func_substr) in markers {
+                if !cpu_thread_samples.thread_name.contains(pattern.as_str()) {
+                    continue;
+                }
+
+                let marker_fid =
+                    match frame_graph::find_marker_func_id(all_func_ids, func_substr, get_name) {
+                        Some(fid) => fid,
+                        None => continue,
+                    };
+
+                // Merge on-CPU + off-CPU samples if sched_switch data exists for this thread.
+                let merged = if let Some(sched_thread_samples) = sched_threads.get(&(pid, tid)) {
+                    frame_graph::merge_oncpu_offcpu_samples(
+                        &cpu_thread_samples.samples,
+                        &sched_thread_samples.samples,
+                    )
+                } else {
+                    // Thread only in cpu-cycles: sort and clone.
+                    let mut samples: Vec<TimedSample> = cpu_thread_samples
+                        .samples
+                        .iter()
+                        .map(|s| TimedSample {
+                            time: s.time,
+                            period: s.period,
+                            callstack_func_ids: s.callstack_func_ids.clone(),
+                            sample_type: frame_graph::SampleType::OnCpu,
+                        })
+                        .collect();
+                    samples.sort_by_key(|s| s.time);
+                    samples
+                };
+
+                let frames = frame_graph::analyze_frames_wallclock(&merged, marker_fid);
+                if frames.is_empty() {
+                    continue;
+                }
+
+                let marker_name = get_name(marker_fid);
+                info!(
+                    "FrameGraph: combined thread '{}' marker '{}' => {} frames",
+                    cpu_thread_samples.thread_name,
+                    marker_name,
+                    frames.len()
+                );
+
+                threads_info.push(frame_graph::FrameGraphThreadInfo {
+                    pid: cpu_thread_samples.pid,
+                    tid: cpu_thread_samples.tid,
+                    thread_name: cpu_thread_samples.thread_name.clone(),
+                    marker_func: marker_name,
+                    marker_func_id: marker_fid,
+                    frames,
+                });
+
+                break;
+            }
+        }
+
+        if threads_info.is_empty() {
+            return None;
+        }
+
+        Some(FrameGraphEventInfo {
+            event_name: "cpu-cycles + sched:sched_switch (combined)".to_string(),
+            threads: threads_info,
+        })
     }
 }
 

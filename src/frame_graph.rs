@@ -13,12 +13,20 @@ pub const DEFAULT_MARKERS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Whether a sample represents on-CPU or off-CPU activity.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SampleType {
+    OnCpu,
+    OffCpu,
+}
+
 /// A raw sample with timestamp and callstack function IDs.
 pub struct TimedSample {
     pub time: u64,
     pub period: u64,
     /// Function IDs in the callstack, leaf first (same order as `add_callstack`).
     pub callstack_func_ids: Vec<i64>,
+    pub sample_type: SampleType,
 }
 
 /// Per-thread collection of timed samples.
@@ -186,5 +194,129 @@ where
         }
     }
     None
+}
+
+/// Merge on-CPU and off-CPU samples for the same thread, sorted by timestamp.
+/// For off-CPU samples, the period is recalculated as the gap to the next sample (duration of sleep).
+/// The last off-CPU sample gets period = 0 (no way to know when it woke up).
+pub fn merge_oncpu_offcpu_samples(
+    oncpu: &[TimedSample],
+    offcpu: &[TimedSample],
+) -> Vec<TimedSample> {
+    let mut merged: Vec<TimedSample> = Vec::with_capacity(oncpu.len() + offcpu.len());
+
+    for s in oncpu {
+        merged.push(TimedSample {
+            time: s.time,
+            period: s.period,
+            callstack_func_ids: s.callstack_func_ids.clone(),
+            sample_type: SampleType::OnCpu,
+        });
+    }
+    for s in offcpu {
+        merged.push(TimedSample {
+            time: s.time,
+            period: 0, // will be filled below
+            callstack_func_ids: s.callstack_func_ids.clone(),
+            sample_type: SampleType::OffCpu,
+        });
+    }
+
+    merged.sort_by_key(|s| s.time);
+
+    // Recalculate off-CPU durations: gap from this off-CPU sample to the next sample.
+    for i in 0..merged.len() {
+        if merged[i].sample_type == SampleType::OffCpu && i + 1 < merged.len() {
+            merged[i].period = merged[i + 1].time.saturating_sub(merged[i].time);
+        }
+    }
+
+    merged
+}
+
+/// Analyze timed samples using wall-clock time for frame total_period.
+///
+/// Similar to `analyze_frames()`, but `total_period = end_time - start_time` (wall-clock),
+/// while per-function stats still use each sample's period (on-CPU time or computed off-CPU duration).
+pub fn analyze_frames_wallclock(
+    samples: &[TimedSample],
+    marker_func_id: i64,
+) -> Vec<FrameEntry> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    // Find frame boundaries.
+    let mut boundary_times: Vec<u64> = Vec::new();
+    for s in samples {
+        if s.callstack_func_ids.contains(&marker_func_id) {
+            boundary_times.push(s.time);
+        }
+    }
+
+    if boundary_times.is_empty() {
+        return Vec::new();
+    }
+
+    // Merge adjacent boundary times within MARKER_GAP_NS.
+    let mut frame_starts: Vec<u64> = Vec::new();
+    frame_starts.push(boundary_times[0]);
+    for i in 1..boundary_times.len() {
+        if boundary_times[i] - boundary_times[i - 1] > MARKER_GAP_NS {
+            frame_starts.push(boundary_times[i]);
+        }
+    }
+
+    if frame_starts.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut frames = Vec::with_capacity(frame_starts.len() - 1);
+    let mut sample_idx = 0;
+
+    for fi in 0..frame_starts.len() - 1 {
+        let start = frame_starts[fi];
+        let end = frame_starts[fi + 1];
+
+        while sample_idx < samples.len() && samples[sample_idx].time < start {
+            sample_idx += 1;
+        }
+
+        // Wall-clock total period.
+        let total_period = end - start;
+
+        let mut func_stats: HashMap<i64, (u64, u64)> = HashMap::new();
+
+        let mut si = sample_idx;
+        while si < samples.len() && samples[si].time < end {
+            let s = &samples[si];
+            let mut seen = std::collections::HashSet::new();
+            for (i, &fid) in s.callstack_func_ids.iter().enumerate() {
+                if !seen.insert(fid) {
+                    continue;
+                }
+                let entry = func_stats.entry(fid).or_insert((0, 0));
+                entry.1 += s.period; // subtree
+                if i == 0 {
+                    entry.0 += s.period; // self (leaf)
+                }
+            }
+            si += 1;
+        }
+
+        let mut func_data = Vec::with_capacity(func_stats.len() * 3);
+        for (fid, (self_ns, subtree_ns)) in &func_stats {
+            func_data.push(*fid);
+            func_data.push(*self_ns as i64);
+            func_data.push(*subtree_ns as i64);
+        }
+
+        frames.push(FrameEntry {
+            total_period,
+            func_data,
+        });
+    }
+
+    frames
 }
 

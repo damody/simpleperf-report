@@ -376,62 +376,90 @@ impl RecordData {
             }
         }
 
-        // Also generate per-event frame graphs (original logic).
+        // Per-event frame graphs: use unified RHI boundaries.
+        // All marker configs share the same func_substr, so resolve once.
+        let marker_func_substr = &markers[0].1;
+        let marker_fid =
+            frame_graph::find_marker_func_id(&all_func_ids, marker_func_substr, &get_name);
+
         for (event_name, threads_map) in &self.timed_samples {
+            let marker_fid = match marker_fid {
+                Some(fid) => fid,
+                None => continue,
+            };
+
+            // Find the RHI thread and compute global frame boundaries from it.
+            let rhi_boundaries = {
+                let rhi_thread = threads_map
+                    .values()
+                    .find(|ts| ts.thread_name.contains("RHIThread"));
+                match rhi_thread {
+                    Some(ts) => {
+                        let mut sorted: Vec<TimedSample> = ts
+                            .samples
+                            .iter()
+                            .map(|s| TimedSample {
+                                time: s.time,
+                                period: s.period,
+                                callstack_func_ids: s.callstack_func_ids.clone(),
+                                sample_type: s.sample_type.clone(),
+                            })
+                            .collect();
+                        sorted.sort_by_key(|s| s.time);
+                        frame_graph::compute_frame_boundaries(&sorted, marker_fid)
+                    }
+                    None => continue,
+                }
+            };
+            if rhi_boundaries.is_empty() {
+                continue;
+            }
+
             let mut threads_info = Vec::new();
 
             for ((_pid, _tid), thread_samples) in threads_map {
-                for (pattern, func_substr) in &markers {
-                    if !thread_samples.thread_name.contains(pattern.as_str()) {
-                        continue;
-                    }
-
-                    let marker_fid =
-                        match frame_graph::find_marker_func_id(&all_func_ids, func_substr, &get_name)
-                        {
-                            Some(fid) => fid,
-                            None => continue,
-                        };
-
-                    let mut sorted_samples: Vec<&TimedSample> =
-                        thread_samples.samples.iter().collect();
-                    sorted_samples.sort_by_key(|s| s.time);
-
-                    let samples_ref: Vec<TimedSample> = sorted_samples
-                        .iter()
-                        .map(|s| TimedSample {
-                            time: s.time,
-                            period: s.period,
-                            callstack_func_ids: s.callstack_func_ids.clone(),
-                            sample_type: s.sample_type.clone(),
-                        })
-                        .collect();
-
-                    let frames = frame_graph::analyze_frames(&samples_ref, marker_fid);
-                    if frames.is_empty() {
-                        continue;
-                    }
-
-                    let marker_name = get_name(marker_fid);
-                    info!(
-                        "FrameGraph: {} thread '{}' marker '{}' => {} frames",
-                        event_name,
-                        thread_samples.thread_name,
-                        marker_name,
-                        frames.len()
-                    );
-
-                    threads_info.push(frame_graph::FrameGraphThreadInfo {
-                        pid: thread_samples.pid,
-                        tid: thread_samples.tid,
-                        thread_name: thread_samples.thread_name.clone(),
-                        marker_func: marker_name,
-                        marker_func_id: marker_fid,
-                        frames,
-                    });
-
-                    break;
+                // Check if this thread matches any marker pattern.
+                let matched = markers
+                    .iter()
+                    .any(|(pattern, _)| thread_samples.thread_name.contains(pattern.as_str()));
+                if !matched {
+                    continue;
                 }
+
+                let mut sorted_samples: Vec<TimedSample> = thread_samples
+                    .samples
+                    .iter()
+                    .map(|s| TimedSample {
+                        time: s.time,
+                        period: s.period,
+                        callstack_func_ids: s.callstack_func_ids.clone(),
+                        sample_type: s.sample_type.clone(),
+                    })
+                    .collect();
+                sorted_samples.sort_by_key(|s| s.time);
+
+                let frames = frame_graph::analyze_frames_with_boundaries(
+                    &sorted_samples,
+                    &rhi_boundaries,
+                );
+
+                let marker_name = get_name(marker_fid);
+                info!(
+                    "FrameGraph: {} thread '{}' marker '{}' => {} frames",
+                    event_name,
+                    thread_samples.thread_name,
+                    marker_name,
+                    frames.len()
+                );
+
+                threads_info.push(frame_graph::FrameGraphThreadInfo {
+                    pid: thread_samples.pid,
+                    tid: thread_samples.tid,
+                    thread_name: thread_samples.thread_name.clone(),
+                    marker_func: marker_name,
+                    marker_func_id: marker_fid,
+                    frames,
+                });
             }
 
             if !threads_info.is_empty() {
@@ -446,6 +474,9 @@ impl RecordData {
     }
 
     /// Generate a combined cpu-cycles + sched:sched_switch frame graph with wall-clock timing.
+    ///
+    /// Uses unified RHI boundaries: frame boundaries are computed from the RHI thread's
+    /// merged samples and applied to all matched threads.
     fn gen_combined_frame_graph<F>(
         &self,
         markers: &[(String, String)],
@@ -458,30 +489,24 @@ impl RecordData {
         let cpu_threads = self.timed_samples.get("cpu-cycles")?;
         let sched_threads = self.timed_samples.get("sched:sched_switch")?;
 
-        let mut threads_info = Vec::new();
+        // All markers share the same func_substr.
+        let marker_func_substr = &markers[0].1;
+        let marker_fid =
+            frame_graph::find_marker_func_id(all_func_ids, marker_func_substr, get_name)?;
 
-        for (&(pid, tid), cpu_thread_samples) in cpu_threads {
-            // Match this thread against marker configs.
-            for (pattern, func_substr) in markers {
-                if !cpu_thread_samples.thread_name.contains(pattern.as_str()) {
-                    continue;
-                }
-
-                let marker_fid =
-                    match frame_graph::find_marker_func_id(all_func_ids, func_substr, get_name) {
-                        Some(fid) => fid,
-                        None => continue,
-                    };
-
-                // Merge on-CPU + off-CPU samples if sched_switch data exists for this thread.
-                let merged = if let Some(sched_thread_samples) = sched_threads.get(&(pid, tid)) {
+        // Find RHI thread and compute unified frame boundaries from its merged samples.
+        let rhi_cpu = cpu_threads
+            .iter()
+            .find(|(_, ts)| ts.thread_name.contains("RHIThread"));
+        let rhi_boundaries = match rhi_cpu {
+            Some((&(pid, tid), rhi_cpu_samples)) => {
+                let merged = if let Some(rhi_sched) = sched_threads.get(&(pid, tid)) {
                     frame_graph::merge_oncpu_offcpu_samples(
-                        &cpu_thread_samples.samples,
-                        &sched_thread_samples.samples,
+                        &rhi_cpu_samples.samples,
+                        &rhi_sched.samples,
                     )
                 } else {
-                    // Thread only in cpu-cycles: sort and clone.
-                    let mut samples: Vec<TimedSample> = cpu_thread_samples
+                    let mut samples: Vec<TimedSample> = rhi_cpu_samples
                         .samples
                         .iter()
                         .map(|s| TimedSample {
@@ -494,31 +519,68 @@ impl RecordData {
                     samples.sort_by_key(|s| s.time);
                     samples
                 };
-
-                let frames = frame_graph::analyze_frames_wallclock(&merged, marker_fid);
-                if frames.is_empty() {
-                    continue;
-                }
-
-                let marker_name = get_name(marker_fid);
-                info!(
-                    "FrameGraph: combined thread '{}' marker '{}' => {} frames",
-                    cpu_thread_samples.thread_name,
-                    marker_name,
-                    frames.len()
-                );
-
-                threads_info.push(frame_graph::FrameGraphThreadInfo {
-                    pid: cpu_thread_samples.pid,
-                    tid: cpu_thread_samples.tid,
-                    thread_name: cpu_thread_samples.thread_name.clone(),
-                    marker_func: marker_name,
-                    marker_func_id: marker_fid,
-                    frames,
-                });
-
-                break;
+                frame_graph::compute_frame_boundaries(&merged, marker_fid)
             }
+            None => return None,
+        };
+
+        if rhi_boundaries.is_empty() {
+            return None;
+        }
+
+        let mut threads_info = Vec::new();
+
+        for (&(pid, tid), cpu_thread_samples) in cpu_threads {
+            // Check if this thread matches any marker pattern.
+            let matched = markers
+                .iter()
+                .any(|(pattern, _)| cpu_thread_samples.thread_name.contains(pattern.as_str()));
+            if !matched {
+                continue;
+            }
+
+            // Merge on-CPU + off-CPU samples.
+            let merged = if let Some(sched_thread_samples) = sched_threads.get(&(pid, tid)) {
+                frame_graph::merge_oncpu_offcpu_samples(
+                    &cpu_thread_samples.samples,
+                    &sched_thread_samples.samples,
+                )
+            } else {
+                let mut samples: Vec<TimedSample> = cpu_thread_samples
+                    .samples
+                    .iter()
+                    .map(|s| TimedSample {
+                        time: s.time,
+                        period: s.period,
+                        callstack_func_ids: s.callstack_func_ids.clone(),
+                        sample_type: frame_graph::SampleType::OnCpu,
+                    })
+                    .collect();
+                samples.sort_by_key(|s| s.time);
+                samples
+            };
+
+            let frames = frame_graph::analyze_frames_wallclock_with_boundaries(
+                &merged,
+                &rhi_boundaries,
+            );
+
+            let marker_name = get_name(marker_fid);
+            info!(
+                "FrameGraph: combined thread '{}' marker '{}' => {} frames",
+                cpu_thread_samples.thread_name,
+                marker_name,
+                frames.len()
+            );
+
+            threads_info.push(frame_graph::FrameGraphThreadInfo {
+                pid: cpu_thread_samples.pid,
+                tid: cpu_thread_samples.tid,
+                thread_name: cpu_thread_samples.thread_name.clone(),
+                marker_func: marker_name,
+                marker_func_id: marker_fid,
+                frames,
+            });
         }
 
         if threads_info.is_empty() {

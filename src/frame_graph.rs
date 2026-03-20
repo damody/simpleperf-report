@@ -4,13 +4,14 @@ use serde::ser::{SerializeSeq, Serializer};
 use serde::Serialize;
 
 /// Default UE marker configurations: (thread_name_pattern, func_substring).
+///
+/// All threads use the same marker function (`FVulkanViewport::Present`) so that
+/// frame boundaries are aligned across threads — the RHI thread's Present timestamps
+/// define global frame boundaries applied to every thread.
 pub const DEFAULT_MARKERS: &[(&str, &str)] = &[
-    ("GameThread", "FEngineLoop::Tick()"),
+    ("GameThread", "FVulkanViewport::Present"),
     ("RHIThread", "FVulkanViewport::Present"),
-    (
-        "RenderThread",
-        "FSceneRenderer::WaitForTasksClearSnapshotsAndDeleteSceneRenderer",
-    ),
+    ("RenderThread", "FVulkanViewport::Present"),
 ];
 
 /// Whether a sample represents on-CPU or off-CPU activity.
@@ -88,100 +89,6 @@ impl Serialize for FrameEntry {
 /// Merge gap threshold: marker appearances within this interval are considered the same call.
 const MARKER_GAP_NS: u64 = 1_000_000; // 1ms
 
-/// Analyze timed samples for one thread and produce frame entries.
-///
-/// `marker_func_id`: the function ID of the marker function.
-/// `samples`: must be sorted by time.
-/// `func_name_lookup`: closure to resolve func_id → function name (for marker matching).
-pub fn analyze_frames(
-    samples: &[TimedSample],
-    marker_func_id: i64,
-) -> Vec<FrameEntry> {
-    if samples.is_empty() {
-        return Vec::new();
-    }
-
-    // Find frame boundaries: indices where marker function appears in the callstack.
-    let mut boundary_times: Vec<u64> = Vec::new();
-    for s in samples {
-        if s.callstack_func_ids.contains(&marker_func_id) {
-            boundary_times.push(s.time);
-        }
-    }
-
-    if boundary_times.is_empty() {
-        return Vec::new();
-    }
-
-    // Merge adjacent boundary times within MARKER_GAP_NS into single boundaries.
-    // Take the first timestamp of each group as the frame start.
-    let mut frame_starts: Vec<u64> = Vec::new();
-    frame_starts.push(boundary_times[0]);
-    for i in 1..boundary_times.len() {
-        if boundary_times[i] - boundary_times[i - 1] > MARKER_GAP_NS {
-            frame_starts.push(boundary_times[i]);
-        }
-    }
-
-    if frame_starts.len() < 2 {
-        // Need at least 2 boundaries to form 1 frame.
-        return Vec::new();
-    }
-
-    // Each frame is [frame_starts[i], frame_starts[i+1]).
-    let mut frames = Vec::with_capacity(frame_starts.len() - 1);
-
-    let mut sample_idx = 0;
-    for fi in 0..frame_starts.len() - 1 {
-        let start = frame_starts[fi];
-        let end = frame_starts[fi + 1];
-
-        // Advance to first sample in this frame.
-        while sample_idx < samples.len() && samples[sample_idx].time < start {
-            sample_idx += 1;
-        }
-
-        let mut total_period: u64 = 0;
-        // Map: func_id → (self_ns, subtree_ns)
-        let mut func_stats: HashMap<i64, (u64, u64)> = HashMap::new();
-
-        let mut si = sample_idx;
-        while si < samples.len() && samples[si].time < end {
-            let s = &samples[si];
-            total_period += s.period;
-
-            // Accumulate per-function stats (same logic as add_callstack).
-            let mut seen = std::collections::HashSet::new();
-            for (i, &fid) in s.callstack_func_ids.iter().enumerate() {
-                if !seen.insert(fid) {
-                    continue; // skip recursive duplicate
-                }
-                let entry = func_stats.entry(fid).or_insert((0, 0));
-                entry.1 += s.period; // subtree
-                if i == 0 {
-                    entry.0 += s.period; // self (leaf)
-                }
-            }
-            si += 1;
-        }
-
-        // Build flat func_data: [fid, self, subtree, fid, self, subtree, ...]
-        let mut func_data = Vec::with_capacity(func_stats.len() * 3);
-        for (fid, (self_ns, subtree_ns)) in &func_stats {
-            func_data.push(*fid);
-            func_data.push(*self_ns as i64);
-            func_data.push(*subtree_ns as i64);
-        }
-
-        frames.push(FrameEntry {
-            total_period,
-            func_data,
-        });
-    }
-
-    frames
-}
-
 /// Find the marker function ID in a set of function IDs by matching the function name substring.
 pub fn find_marker_func_id<F>(func_ids: &[i64], marker_substr: &str, get_name: &F) -> Option<i64>
 where
@@ -234,19 +141,11 @@ pub fn merge_oncpu_offcpu_samples(
     merged
 }
 
-/// Analyze timed samples using wall-clock time for frame total_period.
+/// Compute frame boundary timestamps from samples containing the marker function.
 ///
-/// Similar to `analyze_frames()`, but `total_period = end_time - start_time` (wall-clock),
-/// while per-function stats still use each sample's period (on-CPU time or computed off-CPU duration).
-pub fn analyze_frames_wallclock(
-    samples: &[TimedSample],
-    marker_func_id: i64,
-) -> Vec<FrameEntry> {
-    if samples.is_empty() {
-        return Vec::new();
-    }
-
-    // Find frame boundaries.
+/// Returns a sorted `Vec<u64>` of frame-start timestamps (merged within `MARKER_GAP_NS`).
+/// At least 2 boundaries are needed to form 1 frame; returns empty if fewer.
+pub fn compute_frame_boundaries(samples: &[TimedSample], marker_func_id: i64) -> Vec<u64> {
     let mut boundary_times: Vec<u64> = Vec::new();
     for s in samples {
         if s.callstack_func_ids.contains(&marker_func_id) {
@@ -258,7 +157,7 @@ pub fn analyze_frames_wallclock(
         return Vec::new();
     }
 
-    // Merge adjacent boundary times within MARKER_GAP_NS.
+    // Merge adjacent boundary times within MARKER_GAP_NS into single boundaries.
     let mut frame_starts: Vec<u64> = Vec::new();
     frame_starts.push(boundary_times[0]);
     for i in 1..boundary_times.len() {
@@ -267,6 +166,20 @@ pub fn analyze_frames_wallclock(
         }
     }
 
+    if frame_starts.len() < 2 {
+        return Vec::new();
+    }
+
+    frame_starts
+}
+
+/// Analyze samples using externally provided frame boundaries.
+///
+/// `total_period` for each frame = sum of sample periods within `[start, end)`.
+pub fn analyze_frames_with_boundaries(
+    samples: &[TimedSample],
+    frame_starts: &[u64],
+) -> Vec<FrameEntry> {
     if frame_starts.len() < 2 {
         return Vec::new();
     }
@@ -282,23 +195,23 @@ pub fn analyze_frames_wallclock(
             sample_idx += 1;
         }
 
-        // Wall-clock total period.
-        let total_period = end - start;
-
+        let mut total_period: u64 = 0;
         let mut func_stats: HashMap<i64, (u64, u64)> = HashMap::new();
 
         let mut si = sample_idx;
         while si < samples.len() && samples[si].time < end {
             let s = &samples[si];
+            total_period += s.period;
+
             let mut seen = std::collections::HashSet::new();
             for (i, &fid) in s.callstack_func_ids.iter().enumerate() {
                 if !seen.insert(fid) {
                     continue;
                 }
                 let entry = func_stats.entry(fid).or_insert((0, 0));
-                entry.1 += s.period; // subtree
+                entry.1 += s.period;
                 if i == 0 {
-                    entry.0 += s.period; // self (leaf)
+                    entry.0 += s.period;
                 }
             }
             si += 1;
@@ -319,4 +232,64 @@ pub fn analyze_frames_wallclock(
 
     frames
 }
+
+/// Analyze samples using externally provided frame boundaries with wall-clock timing.
+///
+/// `total_period` for each frame = `end - start` (wall-clock duration),
+/// while per-function stats still use each sample's period.
+pub fn analyze_frames_wallclock_with_boundaries(
+    samples: &[TimedSample],
+    frame_starts: &[u64],
+) -> Vec<FrameEntry> {
+    if frame_starts.len() < 2 {
+        return Vec::new();
+    }
+
+    let mut frames = Vec::with_capacity(frame_starts.len() - 1);
+    let mut sample_idx = 0;
+
+    for fi in 0..frame_starts.len() - 1 {
+        let start = frame_starts[fi];
+        let end = frame_starts[fi + 1];
+
+        while sample_idx < samples.len() && samples[sample_idx].time < start {
+            sample_idx += 1;
+        }
+
+        let total_period = end - start;
+        let mut func_stats: HashMap<i64, (u64, u64)> = HashMap::new();
+
+        let mut si = sample_idx;
+        while si < samples.len() && samples[si].time < end {
+            let s = &samples[si];
+            let mut seen = std::collections::HashSet::new();
+            for (i, &fid) in s.callstack_func_ids.iter().enumerate() {
+                if !seen.insert(fid) {
+                    continue;
+                }
+                let entry = func_stats.entry(fid).or_insert((0, 0));
+                entry.1 += s.period;
+                if i == 0 {
+                    entry.0 += s.period;
+                }
+            }
+            si += 1;
+        }
+
+        let mut func_data = Vec::with_capacity(func_stats.len() * 3);
+        for (fid, (self_ns, subtree_ns)) in &func_stats {
+            func_data.push(*fid);
+            func_data.push(*self_ns as i64);
+            func_data.push(*subtree_ns as i64);
+        }
+
+        frames.push(FrameEntry {
+            total_period,
+            func_data,
+        });
+    }
+
+    frames
+}
+
 

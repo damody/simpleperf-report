@@ -368,6 +368,7 @@ fn finalize_rows(
     rows.into_values()
         .map(|row| {
             let mut pmu_values = BTreeMap::new();
+            let dense_pmu_self = dense_supported_pmu_weights(&row.pmu_self, &event_support);
             for key in RAW_PMU_COLUMNS {
                 if !event_support.get(*key).copied().unwrap_or(false) {
                     pmu_values.insert(
@@ -377,11 +378,11 @@ fn finalize_rows(
                 } else {
                     pmu_values.insert(
                         (*key).to_string(),
-                        MetricValue::Number(row.pmu_self.get(*key).copied().unwrap_or(0) as f64),
+                        MetricValue::Number(dense_pmu_self.get(*key).copied().unwrap_or(0) as f64),
                     );
                 }
             }
-            for (key, value) in derive_pmu_metrics(&row.pmu_self, effective_seconds) {
+            for (key, value) in derive_pmu_metrics(&dense_pmu_self, effective_seconds) {
                 pmu_values.insert(key, value);
             }
 
@@ -419,6 +420,19 @@ fn finalize_rows(
             }
         })
         .collect()
+}
+
+fn dense_supported_pmu_weights(
+    sparse: &BTreeMap<String, u64>,
+    event_support: &BTreeMap<&str, bool>,
+) -> BTreeMap<String, u64> {
+    let mut dense = BTreeMap::new();
+    for key in RAW_PMU_COLUMNS {
+        if event_support.get(*key).copied().unwrap_or(false) {
+            dense.insert((*key).to_string(), sparse.get(*key).copied().unwrap_or(0));
+        }
+    }
+    dense
 }
 
 fn make_spe_values(
@@ -873,5 +887,43 @@ mod tests {
             .rows
             .iter()
             .any(|row| metric_value_number(row.pmu_values.get("cpu_cycles")).unwrap_or(0.0) > 0.0));
+    }
+
+    #[test]
+    fn supported_zero_pmu_events_do_not_make_derived_metrics_missing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = build_report_model(&bundle).unwrap();
+        let row = model
+            .rows
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.pmu_values.get("cpu_cycles"),
+                    Some(MetricValue::Number(0.0))
+                ) && matches!(
+                    row.pmu_values.get("inst_retired"),
+                    Some(MetricValue::Number(0.0))
+                )
+            })
+            .expect("fixture should include a supported source row without PMU samples");
+
+        assert!(!matches!(
+            row.pmu_values.get("cpi"),
+            Some(MetricValue::Missing(_))
+        ));
+        assert!(matches!(
+            row.pmu_values.get("cpi"),
+            Some(MetricValue::Undefined(_))
+        ));
+        assert!(matches!(
+            row.pmu_values.get("mips"),
+            Some(MetricValue::Number(0.0))
+        ));
+        assert!(matches!(
+            row.pmu_values.get("mcps"),
+            Some(MetricValue::Number(0.0))
+        ));
     }
 }

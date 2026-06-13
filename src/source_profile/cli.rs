@@ -8,7 +8,10 @@ use log::info;
 use super::annotated_source::write_annotated_sources;
 use super::bundle::SourceProfileBundle;
 use super::html_report::write_html_summary;
+use super::httpd::run_httpd;
 use super::machine_report::{write_csv_exports, write_source_line_json};
+use super::report_db::write_report_db;
+use super::report_launcher::write_report_launcher;
 use super::schema::PathRemap;
 use super::xlsx_report::write_summary_workbook;
 
@@ -16,7 +19,7 @@ use super::xlsx_report::write_summary_workbook;
 pub struct SourceArgs {
     /// Source profile bundle directory produced by realtime_profile.
     #[arg(long)]
-    pub bundle: PathBuf,
+    pub bundle: Option<PathBuf>,
 
     /// Debug ELF file or directory. Can be passed multiple times.
     #[arg(long = "elf")]
@@ -61,11 +64,34 @@ pub struct SourceArgs {
     /// Write annotated copies of sampled source files into this directory.
     #[arg(long = "annotated-source-out")]
     pub annotated_source_out: Option<PathBuf>,
+
+    /// Serve an existing SourceLine.sqlite database over local HTTP.
+    #[arg(long)]
+    pub httpd: bool,
+
+    /// SQLite database to serve with --httpd.
+    #[arg(long)]
+    pub db: Option<PathBuf>,
+
+    /// Port for --httpd.
+    #[arg(long = "http-port", default_value_t = 9600)]
+    pub http_port: u16,
+
+    /// Listen IP for --httpd.
+    #[arg(long = "listen-ip", default_value = "127.0.0.1")]
+    pub listen_ip: String,
 }
 
 pub fn run_source_command(args: SourceArgs) -> Result<()> {
     validate_source_args(&args)?;
-    let mut bundle = SourceProfileBundle::load(&args.bundle)?;
+    if args.httpd {
+        let db = args.db.as_ref().expect("validated --db");
+        let runtime = tokio::runtime::Runtime::new()?;
+        return runtime.block_on(run_httpd(db.clone(), &args.listen_ip, args.http_port));
+    }
+
+    let bundle_path = args.bundle.as_ref().expect("validated --bundle");
+    let mut bundle = SourceProfileBundle::load(bundle_path)?;
 
     let path_remaps = parse_path_remaps(&args.path_remaps)?;
     bundle.manifest.inputs.debug_elf_hints.extend(
@@ -92,7 +118,7 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
 
     info!(
         "Validated source profile bundle '{}' for session '{}'",
-        args.bundle.display(),
+        bundle_path.display(),
         bundle.manifest.session_id
     );
     info!(
@@ -103,7 +129,9 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
         args.out_dir.display()
     );
     if args.html {
+        write_report_db(&bundle, &args.out_dir.join("SourceLine.sqlite"))?;
         write_html_summary(&bundle, &args.out_dir.join("SourceLine.html"))?;
+        write_report_launcher(&args.out_dir)?;
     }
     if args.xlsx {
         write_summary_workbook(&bundle, &args.out_dir.join("SourceLine.xlsx"))?;
@@ -121,16 +149,29 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
 }
 
 fn validate_source_args(args: &SourceArgs) -> Result<()> {
-    if !args.bundle.exists() {
+    if args.httpd {
+        let Some(db) = &args.db else {
+            bail!("--httpd requires --db <SourceLine.sqlite>");
+        };
+        if !db.is_file() {
+            bail!("SQLite report database '{}' does not exist", db.display());
+        }
+        return Ok(());
+    }
+
+    let Some(bundle) = &args.bundle else {
+        bail!("source report generation requires --bundle <dir>");
+    };
+    if !bundle.exists() {
         bail!(
             "Source profile bundle '{}' does not exist",
-            args.bundle.display()
+            bundle.display()
         );
     }
-    if !args.bundle.is_dir() {
+    if !bundle.is_dir() {
         bail!(
             "Source profile bundle '{}' is not a directory",
-            args.bundle.display()
+            bundle.display()
         );
     }
     for elf in &args.elfs {
@@ -208,7 +249,7 @@ mod tests {
         }
         fs::write(&file, "not a directory").unwrap();
         let args = SourceArgs {
-            bundle: root.join("fixtures/source_profile/minimal"),
+            bundle: Some(root.join("fixtures/source_profile/minimal")),
             elfs: Vec::new(),
             source_roots: Vec::new(),
             path_remaps: Vec::new(),
@@ -220,6 +261,10 @@ mod tests {
             no_browser: true,
             nonzero_threshold: 0.0,
             annotated_source_out: Some(file),
+            httpd: false,
+            db: None,
+            http_port: 9600,
+            listen_ip: "127.0.0.1".to_string(),
         };
 
         assert!(validate_source_args(&args)

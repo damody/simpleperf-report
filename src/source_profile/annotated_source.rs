@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf, Prefix};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -40,6 +42,7 @@ pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) 
         .with_context(|| format!("Failed to create '{}'", output_dir.display()))?;
     let model = build_report_model(bundle)?;
     let roots = absolute_source_roots(bundle);
+    let formatter = discover_mprofiler_astyle();
     let mut by_file = BTreeMap::<PathBuf, BTreeMap<u32, String>>::new();
 
     for row in model
@@ -59,7 +62,13 @@ pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) 
         if annotations.is_empty() {
             continue;
         }
-        match write_annotated_file(&source_file, &annotations, &roots, output_dir)? {
+        match write_annotated_file_with_formatter(
+            &source_file,
+            &annotations,
+            &roots,
+            output_dir,
+            formatter.as_ref(),
+        )? {
             Some(file) => manifest_files.push(file),
             None => skipped_files.push(SkippedAnnotatedSourceFile {
                 original_path: source_file.to_string_lossy().to_string(),
@@ -94,6 +103,22 @@ fn write_annotated_file(
     roots: &[PathBuf],
     output_dir: &Path,
 ) -> Result<Option<AnnotatedSourceFile>> {
+    write_annotated_file_with_formatter(source_file, annotations, roots, output_dir, None)
+}
+
+#[derive(Debug, Clone)]
+struct FormatterCommand {
+    program: PathBuf,
+    args: Vec<String>,
+}
+
+fn write_annotated_file_with_formatter(
+    source_file: &Path,
+    annotations: &BTreeMap<u32, String>,
+    roots: &[PathBuf],
+    output_dir: &Path,
+    formatter: Option<&FormatterCommand>,
+) -> Result<Option<AnnotatedSourceFile>> {
     if !source_file.is_file() {
         return Ok(None);
     }
@@ -115,11 +140,125 @@ fn write_annotated_file(
     }
     fs::write(&output_path, out)
         .with_context(|| format!("Failed to write '{}'", output_path.display()))?;
+    if let Some(formatter) = formatter.filter(|_| is_c_like_source(&output_path)) {
+        run_formatter(formatter, &output_path)?;
+        normalize_mprofiler_comments(&output_path)?;
+    }
     Ok(Some(AnnotatedSourceFile {
         original_path: source_file.to_string_lossy().to_string(),
         annotated_path: output_path.to_string_lossy().to_string(),
         sampled_lines: annotations.len(),
     }))
+}
+
+fn run_formatter(formatter: &FormatterCommand, path: &Path) -> Result<()> {
+    let status = Command::new(&formatter.program)
+        .args(&formatter.args)
+        .arg(path)
+        .status()
+        .with_context(|| format!("Failed to run formatter '{}'", formatter.program.display()))?;
+    if !status.success() {
+        anyhow::bail!(
+            "Formatter '{}' failed with status {status}",
+            formatter.program.display()
+        );
+    }
+    Ok(())
+}
+
+fn discover_mprofiler_astyle() -> Option<FormatterCommand> {
+    if let Ok(path) = env::var("MPROFILER_ASTYLE") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(FormatterCommand {
+                program: path,
+                args: astyle_format_args(),
+            });
+        }
+    }
+
+    let mut roots = Vec::new();
+    if let Ok(exe) = env::current_exe() {
+        roots.extend(exe.ancestors().map(Path::to_path_buf));
+    }
+    if let Ok(cwd) = env::current_dir() {
+        roots.extend(cwd.ancestors().map(Path::to_path_buf));
+    }
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        roots.extend(Path::new(manifest_dir).ancestors().map(Path::to_path_buf));
+    }
+
+    roots.sort();
+    roots.dedup();
+    for root in roots {
+        for candidate in astyle_candidates(&root) {
+            if candidate.is_file() {
+                return Some(FormatterCommand {
+                    program: candidate,
+                    args: astyle_format_args(),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn astyle_candidates(root: &Path) -> Vec<PathBuf> {
+    vec![
+        root.join("package/astyle/mprofiler_astyle.exe"),
+        root.join("astyle-3.6.16-x64/build/mprofiler/Release/AStyle.exe"),
+        root.join("astyle-3.6.16-x64/build/mprofiler/AStyle.exe"),
+        root.join("package/astyle/astyle.exe"),
+        root.join("astyle-3.6.16-x64/astyle.exe"),
+    ]
+}
+
+fn normalize_mprofiler_comments(path: &Path) -> Result<()> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read formatted '{}'", path.display()))?;
+    let normalized = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("// [MProfiler]") {
+                trimmed
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(path, format!("{normalized}\n")).with_context(|| {
+        format!(
+            "Failed to rewrite normalized MProfiler comments in '{}'",
+            path.display()
+        )
+    })
+}
+
+#[cfg(test)]
+fn astyle_format_args() -> Vec<String> {
+    vec![
+        "--suffix=none".to_string(),
+        "--mode=c".to_string(),
+        "--indent=spaces=4".to_string(),
+        "--keep-one-line-blocks".to_string(),
+        "--keep-one-line-statements".to_string(),
+        "--quiet".to_string(),
+    ]
+}
+
+fn is_c_like_source(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase()),
+        Some(extension)
+            if matches!(
+                extension.as_str(),
+                "c" | "cc" | "cpp" | "cxx" | "h" | "hh" | "hpp" | "hxx" | "inl"
+            )
+    )
 }
 
 fn format_annotation(row: &ReportLineRow, spe_available: bool) -> String {
@@ -326,6 +465,69 @@ mod tests {
         let text = fs::read_to_string(PathBuf::from(annotated.annotated_path)).unwrap();
         assert!(text.contains("\n// [MProfiler] cpu_cycles=1000\n    DoWork();"));
         assert!(!text.contains("\n    // [MProfiler]"));
+    }
+
+    #[test]
+    fn astyle_arguments_do_not_enable_line_wrapping() {
+        let args = astyle_format_args();
+
+        assert!(!args.iter().any(|arg| arg.contains("max-code-length")));
+        assert!(!args.iter().any(|arg| arg.contains("break-after-logical")));
+        assert!(args.iter().any(|arg| arg == "--keep-one-line-blocks"));
+        assert!(args.iter().any(|arg| arg == "--keep-one-line-statements"));
+    }
+
+    #[test]
+    fn formats_annotated_source_with_astyle_without_indenting_mprofiler_comments() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source_dir = root.join("target/source_profile_tests/astyle_source");
+        let out = root.join("target/source_profile_tests/astyle_out");
+        let _ = fs::remove_dir_all(&source_dir);
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("tick.cpp");
+        fs::write(&source, "void Tick(){\n    if(true){DoWork();}\n}\n").unwrap();
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            2,
+            "// [MProfiler] p=1.000000%, cpu_cycles=1000, l2d_cache_refill=1000".to_string(),
+        );
+
+        let formatter_script = source_dir.join("fake_formatter.ps1");
+        fs::write(
+            &formatter_script,
+            r#"
+$path = $args[$args.Length - 1]
+$text = Get-Content -Raw -LiteralPath $path
+$text = $text -replace '(?m)^// \[MProfiler\]', '    // [MProfiler]'
+Set-Content -NoNewline -LiteralPath $path -Value $text
+"#,
+        )
+        .unwrap();
+        let formatter = FormatterCommand {
+            program: PathBuf::from("powershell.exe"),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                formatter_script.to_string_lossy().to_string(),
+            ],
+        };
+        let annotated = write_annotated_file_with_formatter(
+            &source,
+            &annotations,
+            &[source_dir.clone()],
+            &out,
+            Some(&formatter),
+        )
+        .unwrap()
+        .unwrap();
+
+        let text = fs::read_to_string(PathBuf::from(annotated.annotated_path)).unwrap();
+        assert!(text.contains("\n// [MProfiler] p=1.000000%, cpu_cycles=1000"));
+        assert!(!text.contains("\n    // [MProfiler]"));
+        assert_eq!(text.matches("// [MProfiler]").count(), 1);
     }
 
     #[test]

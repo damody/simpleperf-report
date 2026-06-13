@@ -4,10 +4,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde_json::json;
 
 use super::bundle::SourceProfileBundle;
-use super::report_model::{build_report_model, metric_value_text};
 use super::summary::SourceReportSummary;
 
 pub trait HtmlReportWriter {
@@ -20,69 +18,6 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
             .with_context(|| format!("Failed to create '{}'", parent.display()))?;
     }
     let manifest = &bundle.manifest;
-    let model = build_report_model(bundle)?;
-    let source_rows_json = serde_json::to_string(
-        &model
-            .rows
-            .iter()
-            .map(|row| json!({
-                "file": row.file,
-                "line": row.line,
-                "function": row.function,
-                "module": row.module,
-                "cpu": row.cpu,
-                "thread": row.thread,
-                "status": row.status,
-                "code": row.code,
-                "detail": row.detail,
-                "self": row.self_weight,
-                "acc": row.accumulated_weight,
-                "p_pct": row.p_pct,
-                "acc_p_pct": row.acc_p_pct,
-                "cpi": metric_value_text(row.pmu_values.get("cpi")),
-                "l1d_cache_hit_rate": metric_value_text(row.pmu_values.get("l1d_cache_hit_rate")),
-                "mips": metric_value_text(row.pmu_values.get("mips")),
-                "mcps": metric_value_text(row.pmu_values.get("mcps")),
-            }))
-            .collect::<Vec<_>>(),
-    )?;
-    let file_rows_json = serde_json::to_string(
-        &model
-            .files
-            .iter()
-            .map(|row| {
-                json!({
-                    "file": row.file,
-                    "self": row.self_weight,
-                    "acc": row.accumulated_weight,
-                    "samples": row.sample_count,
-                    "hotLines": row.hot_lines,
-                    "missing": row.missing,
-                    "unresolved": row.unresolved,
-                    "hotLine": row.hot_line,
-                })
-            })
-            .collect::<Vec<_>>(),
-    )?;
-    let function_rows_json = serde_json::to_string(
-        &model
-            .functions
-            .iter()
-            .map(|row| {
-                json!({
-                    "function": row.function,
-                    "file": row.file,
-                    "lineStart": row.line_start,
-                    "lineEnd": row.line_end,
-                    "module": row.module,
-                    "self": row.self_weight,
-                    "acc": row.accumulated_weight,
-                    "samples": row.sample_count,
-                    "hotLines": row.hot_lines,
-                })
-            })
-            .collect::<Vec<_>>(),
-    )?;
     let html = format!(
         r##"<!doctype html>
 <html lang="zh-Hant">
@@ -133,11 +68,17 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
   <h2>Source Lines</h2>
   <div class="toolbar">
     <input id="sourceFilter" placeholder="filter file/function/code" oninput="renderSourceRows()">
+    <label><input type="checkbox" id="sampledFirst" onchange="renderSourceRows()" checked> sampled first</label>
+    <label><input type="checkbox" id="functionOnly" onchange="renderSourceRows()" checked> function only</label>
     <label><input type="checkbox" id="nonzeroOnly" onchange="renderSourceRows()"> nonzero only</label>
     <label><input type="checkbox" id="missingOnly" onchange="renderSourceRows()"> Missing only</label>
     <label><input type="checkbox" id="unresolvedOnly" onchange="renderSourceRows()"> Unresolved only</label>
     <input id="cpuFilter" placeholder="CPU" oninput="renderSourceRows()">
     <input id="threadFilter" placeholder="thread" oninput="renderSourceRows()">
+    <label>page size <input id="pageSize" type="number" min="1" max="10000" value="1000" onchange="resetSourcePaging()"></label>
+    <button onclick="previousSourcePage()">Prev</button>
+    <button onclick="nextSourcePage()">Next</button>
+    <span id="sourcePageStatus"></span>
   </div>
   <table id="sourceTable">
     <thead>
@@ -189,55 +130,106 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
     {artifact_rows}
   </table>
   <script>
-    const sourceRows = {source_rows_json};
-    const fileRows = {file_rows_json};
-    const functionRows = {function_rows_json};
+    const query = new URLSearchParams(location.search);
+    const API_BASE = query.get("api") || (location.protocol.startsWith("http") ? location.origin : "http://127.0.0.1:9600");
     let sourceSortKey = "file";
     let sourceSortAsc = true;
+    let sourceOffset = 0;
+    let sourceTotal = 0;
+    let activeSourceRows = [];
+    function escapeText(value) {{
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({{"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}}[ch]));
+    }}
+    function pageSize() {{
+      const input = document.getElementById("pageSize");
+      const value = Number.parseInt(input.value || "1000", 10);
+      const clamped = Math.min(10000, Math.max(1, Number.isFinite(value) ? value : 1000));
+      input.value = String(clamped);
+      return clamped;
+    }}
+    function resetSourcePaging() {{
+      sourceOffset = 0;
+      renderSourceRows();
+    }}
     function sortSourceRows(key) {{
       if (sourceSortKey === key) sourceSortAsc = !sourceSortAsc;
       sourceSortKey = key;
+      sourceOffset = 0;
       renderSourceRows();
     }}
-    function rowMatchesFilters(row) {{
-      const text = document.getElementById("sourceFilter").value.toLowerCase();
-      const cpu = document.getElementById("cpuFilter").value;
-      const thread = document.getElementById("threadFilter").value;
-      const nonzeroOnly = document.getElementById("nonzeroOnly").checked;
-      const missingOnly = document.getElementById("missingOnly").checked;
-      const unresolvedOnly = document.getElementById("unresolvedOnly").checked;
-      const haystack = `${{row.file}} ${{row.function}} ${{row.code}}`.toLowerCase();
-      if (text && !haystack.includes(text)) return false;
-      if (cpu && !String(row.cpu).includes(cpu)) return false;
-      if (thread && !String(row.thread).includes(thread)) return false;
-      if (nonzeroOnly && !row.status.includes("NonZero")) return false;
-      if (missingOnly && !row.status.includes("Missing")) return false;
-      if (unresolvedOnly && !row.status.includes("Unresolved")) return false;
-      return true;
-    }}
-    function renderSourceRows() {{
+    async function renderSourceRows() {{
       const tbody = document.querySelector("#sourceTable tbody");
-      const rows = sourceRows.filter(rowMatchesFilters).sort((a, b) => {{
-        const av = a[sourceSortKey] ?? "";
-        const bv = b[sourceSortKey] ?? "";
-        return sourceSortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-      }});
-      tbody.innerHTML = rows.map(row => `<tr><td>${{row.file}}</td><td>${{row.line}}</td><td>${{row.function}}</td><td>${{row.module}}</td><td>${{row.cpu}}</td><td>${{row.thread}}</td><td>${{row.status}}</td><td><code>${{row.code}}</code></td></tr>`).join("");
-      renderSourceViewer(rows);
+      tbody.innerHTML = `<tr><td colspan="8">Loading...</td></tr>`;
+      const params = new URLSearchParams();
+      params.set("limit", String(pageSize()));
+      params.set("offset", String(sourceOffset));
+      params.set("sort", sourceSortKey);
+      params.set("desc", String(!sourceSortAsc));
+      const filter = document.getElementById("sourceFilter").value.trim();
+      const cpu = document.getElementById("cpuFilter").value.trim();
+      const thread = document.getElementById("threadFilter").value.trim();
+      if (filter) params.set("filter", filter);
+      if (cpu) params.set("cpu", cpu);
+      if (thread) params.set("thread", thread);
+      if (document.getElementById("sampledFirst").checked) params.set("sampled_first", "true");
+      if (document.getElementById("functionOnly").checked) params.set("function_only", "true");
+      if (document.getElementById("nonzeroOnly").checked) params.set("nonzero_only", "true");
+      if (document.getElementById("missingOnly").checked) params.set("missing_only", "true");
+      if (document.getElementById("unresolvedOnly").checked) params.set("unresolved_only", "true");
+      try {{
+        const response = await fetch(`${{API_BASE}}/api/source-lines?${{params}}`);
+        if (!response.ok) throw new Error(await response.text());
+        const payload = await response.json();
+        activeSourceRows = payload.rows || [];
+        sourceTotal = payload.total || 0;
+        sourceOffset = payload.offset || 0;
+        tbody.innerHTML = activeSourceRows.map(row => `<tr><td>${{escapeText(row.file)}}</td><td>${{row.line}}</td><td>${{escapeText(row.function)}}</td><td>${{escapeText(row.module)}}</td><td>${{escapeText(row.cpu)}}</td><td>${{escapeText(row.thread)}}</td><td>${{escapeText(row.status)}}</td><td><code>${{escapeText(row.code)}}</code></td></tr>`).join("");
+        if (activeSourceRows.length === 0) tbody.innerHTML = `<tr><td colspan="8">No rows</td></tr>`;
+        renderSourceViewer(activeSourceRows);
+        renderPageStatus();
+      }} catch (error) {{
+        tbody.innerHTML = `<tr><td colspan="8">Start the data server: simpleperf_report source --httpd --db SourceLine.sqlite --http-port 9600<br>${{escapeText(error.message)}}</td></tr>`;
+        renderSourceViewer([]);
+      }}
     }}
     function renderSourceViewer(rows) {{
       const viewer = document.getElementById("sourceViewer");
-      viewer.innerHTML = rows.map(row => `<div class="source-line ${{row.status}}" title="${{row.detail ?? row.status}}" onclick="alert(row.detail ?? row.status)"><span>${{row.line}}</span><span>${{row.status}}</span><code>${{row.code}}</code></div>`).join("");
+      viewer.innerHTML = rows.map(row => `<div class="source-line ${{escapeText(row.status)}}" title="${{escapeText(row.detail ?? row.status)}}" onclick="alert(this.title)"><span>${{row.line}}</span><span>${{escapeText(row.status)}}</span><code>${{escapeText(row.code)}}</code></div>`).join("");
+    }}
+    function renderPageStatus() {{
+      const start = sourceTotal === 0 ? 0 : sourceOffset + 1;
+      const end = Math.min(sourceOffset + activeSourceRows.length, sourceTotal);
+      document.getElementById("sourcePageStatus").textContent = `showing ${{start}}-${{end}} of ${{sourceTotal}}`;
+    }}
+    function previousSourcePage() {{
+      sourceOffset = Math.max(0, sourceOffset - pageSize());
+      renderSourceRows();
+    }}
+    function nextSourcePage() {{
+      if (sourceOffset + pageSize() < sourceTotal) {{
+        sourceOffset += pageSize();
+        renderSourceRows();
+      }}
     }}
     function jumpToFileLine(file, line) {{
       document.getElementById("sourceFilter").value = file;
+      sourceOffset = 0;
       renderSourceRows();
       const viewer = document.getElementById("sourceViewer");
       viewer.scrollIntoView({{ behavior: "smooth", block: "start" }});
     }}
-    function renderFilesAndFunctions() {{
-      document.querySelector("#filesTable tbody").innerHTML = fileRows.map(row => `<tr onclick="jumpToFileLine('${{row.file}}', ${{row.hotLine ?? 0}})"><td>${{row.file}}</td><td>${{row.self}}</td><td>${{row.acc}}</td><td>${{row.samples}}</td><td>${{row.hotLines}}</td><td>${{row.missing}}</td><td>${{row.unresolved}}</td></tr>`).join("");
-      document.querySelector("#functionsTable tbody").innerHTML = functionRows.map(row => `<tr onclick="jumpToFileLine('${{row.file}}', ${{row.lineStart ?? 0}})"><td>${{row.function}}</td><td>${{row.file}}</td><td>${{row.lineStart}}-${{row.lineEnd}}</td><td>${{row.module}}</td><td>${{row.self}}</td><td>${{row.acc}}</td><td>${{row.samples}}</td><td>${{row.hotLines}}</td></tr>`).join("");
+    async function renderFilesAndFunctions() {{
+      try {{
+        const [files, functions] = await Promise.all([
+          fetch(`${{API_BASE}}/api/files`).then(response => response.json()),
+          fetch(`${{API_BASE}}/api/functions`).then(response => response.json()),
+        ]);
+        document.querySelector("#filesTable tbody").innerHTML = files.map(row => `<tr data-file="${{escapeText(row.file)}}" data-line="${{row.hot_line ?? 0}}" onclick="jumpToFileLine(this.dataset.file, Number(this.dataset.line))"><td>${{escapeText(row.file)}}</td><td>${{row.self_weight}}</td><td>${{row.accumulated_weight}}</td><td>${{row.sample_count}}</td><td>${{row.hot_lines}}</td><td>${{row.missing}}</td><td>${{row.unresolved}}</td></tr>`).join("");
+        document.querySelector("#functionsTable tbody").innerHTML = functions.map(row => `<tr data-file="${{escapeText(row.file)}}" data-line="${{row.line_start ?? 0}}" onclick="jumpToFileLine(this.dataset.file, Number(this.dataset.line))"><td>${{escapeText(row.function)}}</td><td>${{escapeText(row.file)}}</td><td>${{row.line_start}}-${{row.line_end}}</td><td>${{escapeText(row.module)}}</td><td>${{row.self_weight}}</td><td>${{row.accumulated_weight}}</td><td>${{row.sample_count}}</td><td>${{escapeText(row.hot_lines)}}</td></tr>`).join("");
+      }} catch (error) {{
+        document.querySelector("#filesTable tbody").innerHTML = `<tr><td colspan="7">Data server unavailable</td></tr>`;
+        document.querySelector("#functionsTable tbody").innerHTML = `<tr><td colspan="8">Data server unavailable</td></tr>`;
+      }}
     }}
     renderSourceRows();
     renderFilesAndFunctions();
@@ -283,9 +275,6 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
         sample_period = manifest.capture_options.sample_period,
         callchain_depth = manifest.capture_options.callchain_depth,
         quality_rows = quality_rows(bundle),
-        source_rows_json = source_rows_json,
-        file_rows_json = file_rows_json,
-        function_rows_json = function_rows_json,
         artifact_rows = manifest
             .artifacts
             .files
@@ -427,6 +416,13 @@ mod tests {
         assert!(html.contains("Functions"));
         assert!(html.contains("Column Help"));
         assert!(html.contains("Missing"));
-        assert!(html.contains("renderSourceRows"));
+        assert!(html.contains("/api/source-lines"));
+        assert!(html.contains("value=\"1000\""));
+        assert!(html.contains("max=\"10000\""));
+        assert!(html.contains("id=\"sampledFirst\""));
+        assert!(html.contains("id=\"functionOnly\""));
+        assert!(html.contains("sampled_first"));
+        assert!(html.contains("function_only"));
+        assert!(!html.contains("const sourceRows ="));
     }
 }

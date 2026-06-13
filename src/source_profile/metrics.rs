@@ -424,6 +424,8 @@ pub struct PmuAddressAggregate {
     pub tids: BTreeSet<u32>,
     pub self_weight_by_event: BTreeMap<String, u64>,
     pub accumulated_weight_by_event: BTreeMap<String, u64>,
+    pub self_samples_by_event: BTreeMap<String, u64>,
+    pub accumulated_samples_by_event: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -494,6 +496,9 @@ fn aggregate_one_pmu_sample(
     *row.self_weight_by_event
         .entry(event_key.clone())
         .or_default() += sample.period_or_weight;
+    *row.self_samples_by_event
+        .entry(event_key.clone())
+        .or_default() += 1;
 
     for callchain_ip in &sample.callchain_ips {
         let callchain_key = PmuAddressKey {
@@ -507,6 +512,10 @@ fn aggregate_one_pmu_sample(
             .accumulated_weight_by_event
             .entry(event_key.clone())
             .or_default() += sample.period_or_weight;
+        *callchain_row
+            .accumulated_samples_by_event
+            .entry(event_key.clone())
+            .or_default() += 1;
     }
 }
 

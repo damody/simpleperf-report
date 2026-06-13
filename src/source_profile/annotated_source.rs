@@ -629,7 +629,7 @@ Add-Content -LiteralPath $path -Value "// formatter saw short path"
             file_p_pct: 1.0,
             file_acc_p_pct: 1.0,
             pmu_values: BTreeMap::from([
-                ("cpu_cycles".to_string(), MetricValue::Number(1000.0)),
+                ("cpu_cycles".to_string(), MetricValue::Number(1.0)),
                 ("cpi".to_string(), MetricValue::Number(1.0)),
             ]),
             spe_values: BTreeMap::from([(
@@ -642,7 +642,7 @@ Add-Content -LiteralPath $path -Value "// formatter saw short path"
         let annotation = format_annotation(&row, false);
 
         assert!(annotation.starts_with("// [MProfiler] sample_count=1, p=1.000000%"));
-        assert!(annotation.contains("cpu_cycles=1000"));
+        assert!(annotation.contains("cpu_cycles=1"));
         assert!(!annotation.contains("spe_sample_count"));
         assert!(!annotation.contains("spe_"));
     }

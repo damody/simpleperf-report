@@ -119,6 +119,8 @@ struct MutableLineRow {
     tids: BTreeSet<u32>,
     pmu_self: BTreeMap<String, u64>,
     pmu_acc: BTreeMap<String, u64>,
+    pmu_self_samples: BTreeMap<String, u64>,
+    pmu_acc_samples: BTreeMap<String, u64>,
     pmu_sample_count: u64,
     spe: Option<SpeAddressAggregate>,
     unresolved: Vec<String>,
@@ -158,6 +160,8 @@ impl MutableLineRow {
             tids: BTreeSet::new(),
             pmu_self: BTreeMap::new(),
             pmu_acc: BTreeMap::new(),
+            pmu_self_samples: BTreeMap::new(),
+            pmu_acc_samples: BTreeMap::new(),
             pmu_sample_count: 0,
             spe: None,
             unresolved: Vec::new(),
@@ -427,6 +431,12 @@ fn merge_pmu(row: &mut MutableLineRow, aggregate: PmuAddressAggregate) {
     for (event, value) in aggregate.accumulated_weight_by_event {
         *row.pmu_acc.entry(event).or_default() += value;
     }
+    for (event, value) in aggregate.self_samples_by_event {
+        *row.pmu_self_samples.entry(event).or_default() += value;
+    }
+    for (event, value) in aggregate.accumulated_samples_by_event {
+        *row.pmu_acc_samples.entry(event).or_default() += value;
+    }
 }
 
 fn append_cpu_coverage_diagnostic(
@@ -541,7 +551,8 @@ fn finalize_rows(
     rows.into_values()
         .map(|row| {
             let mut pmu_values = BTreeMap::new();
-            let dense_pmu_self = dense_supported_pmu_weights(&row.pmu_self, &event_support);
+            let dense_pmu_self_samples =
+                dense_supported_pmu_counts(&row.pmu_self_samples, &event_support);
             for key in RAW_PMU_COLUMNS {
                 if !event_support.get(*key).copied().unwrap_or(false) {
                     pmu_values.insert(
@@ -549,13 +560,16 @@ fn finalize_rows(
                         MetricValue::Missing(format!("{key} is not available")),
                     );
                 } else {
-                    pmu_values.insert(
-                        (*key).to_string(),
-                        MetricValue::Number(dense_pmu_self.get(*key).copied().unwrap_or(0) as f64),
-                    );
+                    let sample_count = dense_pmu_self_samples.get(*key).copied().unwrap_or(0);
+                    let ratio = if row.pmu_sample_count > 0 {
+                        sample_count as f64 / row.pmu_sample_count as f64
+                    } else {
+                        0.0
+                    };
+                    pmu_values.insert((*key).to_string(), MetricValue::Number(ratio));
                 }
             }
-            for (key, value) in derive_pmu_metrics(&dense_pmu_self, effective_seconds) {
+            for (key, value) in derive_pmu_metrics(&dense_pmu_self_samples, effective_seconds) {
                 pmu_values.insert(key, value);
             }
 
@@ -596,7 +610,7 @@ fn finalize_rows(
         .collect()
 }
 
-fn dense_supported_pmu_weights(
+fn dense_supported_pmu_counts(
     sparse: &BTreeMap<String, u64>,
     event_support: &BTreeMap<&str, bool>,
 ) -> BTreeMap<String, u64> {
@@ -1061,6 +1075,48 @@ mod tests {
             .rows
             .iter()
             .any(|row| metric_value_number(row.pmu_values.get("cpu_cycles")).unwrap_or(0.0) > 0.0));
+    }
+
+    #[test]
+    fn raw_pmu_columns_are_event_sample_ratio_over_line_samples() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let row = MutableLineRow {
+            file: PathBuf::from("fixture.cpp"),
+            line: 1,
+            function: "tick".to_string(),
+            module: "libfixture.so".to_string(),
+            code: "Tick();".to_string(),
+            cpus: BTreeSet::from([0]),
+            tids: BTreeSet::from([42]),
+            pmu_self: BTreeMap::from([
+                ("cpu_cycles".to_string(), 1000),
+                ("inst_retired".to_string(), 1000),
+            ]),
+            pmu_acc: BTreeMap::new(),
+            pmu_self_samples: BTreeMap::from([
+                ("cpu_cycles".to_string(), 1),
+                ("inst_retired".to_string(), 1),
+            ]),
+            pmu_acc_samples: BTreeMap::new(),
+            pmu_sample_count: 2,
+            spe: None,
+            unresolved: Vec::new(),
+        };
+        let rows = finalize_rows(
+            &bundle,
+            BTreeMap::from([((row.file.clone(), row.line), row)]),
+        );
+
+        assert!(matches!(
+            rows[0].pmu_values.get("cpu_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 0.5).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            rows[0].pmu_values.get("inst_retired"),
+            Some(MetricValue::Number(value)) if (*value - 0.5).abs() < f64::EPSILON
+        ));
     }
 
     #[test]

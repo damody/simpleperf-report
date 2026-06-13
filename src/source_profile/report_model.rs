@@ -122,6 +122,28 @@ struct MutableLineRow {
     unresolved: Vec<String>,
 }
 
+#[derive(Default)]
+struct SourceCodeCache {
+    files: BTreeMap<PathBuf, Vec<String>>,
+}
+
+impl SourceCodeCache {
+    fn line_code(&mut self, file: &Path, line: u32) -> String {
+        let key = normalize_existing_path(file.to_path_buf());
+        if !self.files.contains_key(&key) {
+            let lines = load_source_file(&key)
+                .map(|lines| lines.into_iter().map(|line| line.code).collect())
+                .unwrap_or_default();
+            self.files.insert(key.clone(), lines);
+        }
+        self.files
+            .get(&key)
+            .and_then(|lines| lines.get(line.saturating_sub(1) as usize))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
 impl MutableLineRow {
     fn new(file: PathBuf, line: u32, code: String) -> Self {
         Self {
@@ -146,6 +168,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     let path_remaps = absolute_path_remaps(bundle);
     let mut rows = BTreeMap::<(PathBuf, u32), MutableLineRow>::new();
     let mut source_by_name = BTreeMap::<String, PathBuf>::new();
+    let mut source_code_cache = SourceCodeCache::default();
 
     for file in &source_files {
         if let Some(name) = file.file_name().and_then(|name| name.to_str()) {
@@ -183,9 +206,13 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 key.mapping_id,
                 key.ip,
             )? {
+                let code = source_code_cache.line_code(&file, line);
                 let row = rows
                     .entry((file.clone(), line))
-                    .or_insert_with(|| MutableLineRow::new(file.clone(), line, String::new()));
+                    .or_insert_with(|| MutableLineRow::new(file.clone(), line, code));
+                if row.code.is_empty() {
+                    row.code = source_code_cache.line_code(&file, line);
+                }
                 if let Some(sample) = sample_meta {
                     row.cpus.insert(sample.cpu);
                     row.tids.insert(sample.tid);
@@ -219,9 +246,13 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 key.mapping_id,
                 key.ip,
             )? {
+                let code = source_code_cache.line_code(&file, line);
                 let row = rows
                     .entry((file.clone(), line))
-                    .or_insert_with(|| MutableLineRow::new(file.clone(), line, String::new()));
+                    .or_insert_with(|| MutableLineRow::new(file.clone(), line, code));
+                if row.code.is_empty() {
+                    row.code = source_code_cache.line_code(&file, line);
+                }
                 if let Some(sample) = sample_meta {
                     row.cpus.insert(sample.cpu);
                     row.tids.insert(sample.tid);
@@ -706,13 +737,18 @@ fn discover_source_files(bundle: &SourceProfileBundle) -> Result<Vec<PathBuf>> {
         let root = absolute_bundle_path(bundle, hint);
         if root.is_file() && is_source_file(&root) {
             files.push(normalize_existing_path(root));
-        } else if root.is_dir() {
+        } else if root.is_dir() && should_preload_source_root(&root) {
             collect_source_files(&root, &mut files)?;
         }
     }
     files.sort();
     files.dedup();
     Ok(files)
+}
+
+fn should_preload_source_root(root: &Path) -> bool {
+    let normalized = root.to_string_lossy().replace('\\', "/");
+    !normalized.contains("/Engine/Source")
 }
 
 fn collect_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {

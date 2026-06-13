@@ -13,8 +13,8 @@ pub struct SourceLine {
 }
 
 pub fn load_source_file(path: &Path) -> Result<Vec<SourceLine>> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
+    let text = String::from_utf8_lossy(&bytes);
     Ok(text
         .lines()
         .enumerate()
@@ -40,5 +40,20 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line.code.contains("sum += values[i] * 3")));
+    }
+
+    #[test]
+    fn loads_non_utf8_source_lossily() {
+        let path = std::env::temp_dir().join(format!(
+            "mprofiler-non-utf8-source-{}.cpp",
+            std::process::id()
+        ));
+        fs::write(&path, b"int ok = 1;\ninvalid \xff byte\n").unwrap();
+        let lines = load_source_file(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].code, "int ok = 1;");
+        assert!(lines[1].code.contains('\u{fffd}'));
     }
 }

@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -97,6 +98,7 @@ pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) 
     })
 }
 
+#[cfg(test)]
 fn write_annotated_file(
     source_file: &Path,
     annotations: &BTreeMap<u32, String>,
@@ -152,19 +154,56 @@ fn write_annotated_file_with_formatter(
 }
 
 fn run_formatter(formatter: &FormatterCommand, path: &Path) -> Result<()> {
+    let Some(file_name) = path.file_name() else {
+        anyhow::bail!(
+            "Cannot format path without a file name: '{}'",
+            path.display()
+        );
+    };
+    let temp_dir = env::temp_dir().join("mprofiler_astyle").join(format!(
+        "{}_{}",
+        std::process::id(),
+        FORMATTER_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&temp_dir).with_context(|| {
+        format!(
+            "Failed to create formatter temp dir '{}'",
+            temp_dir.display()
+        )
+    })?;
+    let temp_path = temp_dir.join(file_name);
+    fs::copy(path, &temp_path).with_context(|| {
+        format!(
+            "Failed to stage '{}' for formatter at '{}'",
+            path.display(),
+            temp_path.display()
+        )
+    })?;
+
     let status = Command::new(&formatter.program)
         .args(&formatter.args)
-        .arg(path)
+        .arg(&temp_path)
         .status()
         .with_context(|| format!("Failed to run formatter '{}'", formatter.program.display()))?;
     if !status.success() {
+        let _ = fs::remove_dir_all(&temp_dir);
         anyhow::bail!(
             "Formatter '{}' failed with status {status}",
             formatter.program.display()
         );
     }
+    fs::copy(&temp_path, path).with_context(|| {
+        format!(
+            "Failed to copy formatted temp file '{}' back to '{}'",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    let _ = fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+static FORMATTER_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn discover_mprofiler_astyle() -> Option<FormatterCommand> {
     if let Ok(path) = env::var("MPROFILER_ASTYLE") {
@@ -236,7 +275,6 @@ fn normalize_mprofiler_comments(path: &Path) -> Result<()> {
     })
 }
 
-#[cfg(test)]
 fn astyle_format_args() -> Vec<String> {
     vec![
         "--suffix=none".to_string(),
@@ -528,6 +566,47 @@ Set-Content -NoNewline -LiteralPath $path -Value $text
         assert!(text.contains("\n// [MProfiler] p=1.000000%, cpu_cycles=1000"));
         assert!(!text.contains("\n    // [MProfiler]"));
         assert_eq!(text.matches("// [MProfiler]").count(), 1);
+    }
+
+    #[test]
+    fn formatter_uses_short_temporary_path_for_long_output_paths() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let scratch = root.join("target/source_profile_tests/long_path_formatter");
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(&scratch).unwrap();
+        let mut long_dir = scratch.clone();
+        for index in 0..10 {
+            long_dir.push(format!("very_long_generated_segment_{index:02}"));
+        }
+        fs::create_dir_all(&long_dir).unwrap();
+        let source = long_dir.join("tick.cpp");
+        fs::write(&source, "void Tick() {}\n").unwrap();
+
+        let formatter_script = scratch.join("reject_long_arg.ps1");
+        fs::write(
+            &formatter_script,
+            r#"
+$path = $args[$args.Length - 1]
+if ($path.Length -gt 120) { exit 23 }
+Add-Content -LiteralPath $path -Value "// formatter saw short path"
+"#,
+        )
+        .unwrap();
+        let formatter = FormatterCommand {
+            program: PathBuf::from("powershell.exe"),
+            args: vec![
+                "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-File".to_string(),
+                formatter_script.to_string_lossy().to_string(),
+            ],
+        };
+
+        run_formatter(&formatter, &source).unwrap();
+
+        let text = fs::read_to_string(&source).unwrap();
+        assert!(text.contains("formatter saw short path"));
     }
 
     #[test]

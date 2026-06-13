@@ -25,8 +25,7 @@ type AggregateThreadsFn =
     unsafe extern "C" fn(*mut ReportLibStruct, *const *const c_char, usize) -> bool;
 type GetNextSampleFn = unsafe extern "C" fn(*mut ReportLibStruct) -> *const SampleStruct;
 type GetEventOfCurrentSampleFn = unsafe extern "C" fn(*mut ReportLibStruct) -> *const EventStruct;
-type GetSymbolOfCurrentSampleFn =
-    unsafe extern "C" fn(*mut ReportLibStruct) -> *const SymbolStruct;
+type GetSymbolOfCurrentSampleFn = unsafe extern "C" fn(*mut ReportLibStruct) -> *const SymbolStruct;
 type GetCallChainOfCurrentSampleFn =
     unsafe extern "C" fn(*mut ReportLibStruct) -> *const CallChainStructure;
 type GetBuildIdForPathFn =
@@ -116,12 +115,7 @@ macro_rules! load_fn {
         unsafe {
             *$lib
                 .get::<$ty>($name)
-                .with_context(|| {
-                    format!(
-                        "Symbol {:?} not found",
-                        String::from_utf8_lossy($name)
-                    )
-                })?
+                .with_context(|| format!("Symbol {:?} not found", String::from_utf8_lossy($name)))?
         }
     };
 }
@@ -147,8 +141,7 @@ impl ReportLib {
 
         let lib_path = dll_dir.join("libsimpleperf_report.dll");
         let lib = unsafe {
-            Library::new(&lib_path)
-                .with_context(|| format!("Failed to load {:?}", lib_path))?
+            Library::new(&lib_path).with_context(|| format!("Failed to load {:?}", lib_path))?
         };
 
         // Cache all function pointers once
@@ -268,8 +261,7 @@ impl ReportLib {
             .map(|s| CString::new(s.as_str()))
             .collect::<Result<_, _>>()?;
         let ptrs: Vec<*const c_char> = c_strings.iter().map(|s| s.as_ptr()).collect();
-        let ok =
-            unsafe { (self.fns.aggregate_threads)(self.instance, ptrs.as_ptr(), ptrs.len()) };
+        let ok = unsafe { (self.fns.aggregate_threads)(self.instance, ptrs.as_ptr(), ptrs.len()) };
         if !ok {
             bail!("AggregateThreads failed");
         }

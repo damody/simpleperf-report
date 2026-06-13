@@ -18,6 +18,9 @@ chrono = "0.4"
 log = "0.4"
 env_logger = "0.11"
 open = "5"
+object = "0.37"
+addr2line = "0.25"
+rust_xlsxwriter = "0.92"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,88 @@
+{
+  "schema": {
+    "name": "mprofiler.source_profile_bundle",
+    "version": { "major": 1, "minor": 0, "patch": 0 },
+    "min_reader_version": { "major": 1, "minor": 0, "patch": 0 }
+  },
+  "producer": {
+    "name": "realtime_profile",
+    "version": "0.1.0-fixture",
+    "git_revision": null
+  },
+  "session_id": "fixture-arpg4-like-001",
+  "created_utc": "2026-06-13T01:00:00Z",
+  "recording": {
+    "started_utc": "2026-06-13T01:00:01Z",
+    "ended_utc": "2026-06-13T01:00:06Z",
+    "duration_ms": 5000
+  },
+  "device": {
+    "serial": "fixture-device",
+    "model": "fixture-arm64",
+    "manufacturer": "fixture",
+    "android_release": "14",
+    "android_sdk": 34,
+    "android_build_fingerprint": "fixture/build/fingerprint",
+    "abi": "arm64-v8a"
+  },
+  "target": {
+    "package": "com.EpicLRT.ActionRPGSample",
+    "pid": 4242,
+    "process_name": "com.EpicLRT.ActionRPGSample"
+  },
+  "cpu": {
+    "selected_cpus": [0],
+    "selected_clusters": ["little"]
+  },
+  "lanes": {
+    "pmu": { "enabled": true, "available": true, "missing_reason": null },
+    "spe": { "enabled": true, "available": false, "missing_reason": "SPE test-open failed: ENOENT" }
+  },
+  "capture_options": {
+    "sample_period": 1000,
+    "callchain_depth": 16,
+    "pmu_buffer_pages": 8192,
+    "spe_aux_buffer_bytes": null,
+    "duration_ms_requested": 5000
+  },
+  "inputs": {
+    "debug_elf_hints": [
+      "D:/UEProj/ARPG4/Binaries/Android/libUE4.so",
+      "D:/UEProj/ARPG4/Plugins/MagtModule/Binaries/Android/arm64-v8a/libMagtModule.so"
+    ],
+    "source_root_hints": [
+      "D:/UEProj/ARPG4/Plugins",
+      "D:/UEProj/ARPG4/Source"
+    ],
+    "path_remaps": [
+      { "from": "/build/++UE4/Sync/LocalBuilds/Android/ARPG4", "to": "D:/UEProj/ARPG4" },
+      { "from": "/data/app/com.EpicLRT.ActionRPGSample/lib/arm64", "to": "D:/UEProj/ARPG4/Binaries/Android" }
+    ]
+  },
+  "artifacts": {
+    "files": [
+      { "path": "manifest.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "capability.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "event_catalog.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "metric_catalog.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "event_runs.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "maps.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "threads.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "build_ids.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "loss.json", "role": "metadata", "required": true, "encoding": "json" },
+      { "path": "pmu_samples.bin", "role": "pmu_samples", "required": false, "encoding": "mpsp-pmu-v1-le" },
+      { "path": "spe_samples.bin", "role": "spe_samples", "required": false, "encoding": "mpsp-spe-v1-le" }
+    ],
+    "report_paths": {
+      "html": "reports/SourceLine.html",
+      "xlsx": "reports/SourceLine.xlsx",
+      "json": "reports/SourceLine.json",
+      "csv_dir": "reports/csv"
+    }
+  },
+  "compatibility": {
+    "unknown_fields": "ignore",
+    "missing_optional_files": "warn",
+    "fixture_expectation": "This fixture models ARPG4 path remap behavior without making Unreal paths part of the schema."
+  }
+}

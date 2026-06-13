@@ -1,0 +1,5 @@
+2026-06-13T00:40:01Z unresolved fixture started
+2026-06-13T00:40:01Z opened cpu_cycles on cpu=0 sample_period=1000 buffer_pages=8192
+2026-06-13T00:40:01Z opened inst_retired on cpu=0 sample_period=1000 buffer_pages=8192
+2026-06-13T00:40:06Z unresolved fixture finalized samples=5 lost=0
+2026-06-13T00:40:06Z fixture intentionally omits matching debug ELF and source root

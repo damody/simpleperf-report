@@ -1,0 +1,8 @@
+{
+  "session_id": "fixture-cache-001",
+  "metrics": [
+    { "metric_key": "l1d_cache_hit_rate", "display_name": "L1D hit rate", "formula": "(l1d_cache_access - l1d_cache_refill) / l1d_cache_access", "unit": "ratio", "required_events": ["l1d_cache_access", "l1d_cache_refill"], "fallback_events": [], "missing_behavior": "Missing when L1D access or refill event is unsupported; Undefined when access is zero", "physical_meaning": "L1D access 中沒有造成 refill 的比例，代表 L1D 命中率的 sampling 近似。" },
+    { "metric_key": "l2d_cache_hit_rate", "display_name": "L2D hit rate", "formula": "(l2d_cache_access - l2d_cache_refill) / l2d_cache_access", "unit": "ratio", "required_events": ["l2d_cache_access", "l2d_cache_refill"], "fallback_events": [], "missing_behavior": "Missing when L2D access or refill event is unsupported; Undefined when access is zero", "physical_meaning": "L2D access 中沒有造成 refill 的比例，代表 L2D 命中率的 sampling 近似。" },
+    { "metric_key": "l3d_cache_hit_rate", "display_name": "L3D hit rate", "formula": "(l3d_cache_access - l3d_cache_refill) / l3d_cache_access", "unit": "ratio", "required_events": ["l3d_cache_access", "l3d_cache_refill"], "fallback_events": ["ll_cache_read", "ll_cache_read_miss"], "missing_behavior": "Missing when neither L3D nor LLC fallback events are available; Undefined when access is zero", "physical_meaning": "L3D 或 last-level cache access 中未 refill/miss 的比例，代表較外層 cache 命中率的 sampling 近似。" }
+  ]
+}

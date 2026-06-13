@@ -1,0 +1,9 @@
+{
+  "session_id": "fixture-stall-001",
+  "events": [
+    { "event_key": "cpu_cycles", "display_name": "CPU cycles", "source": "pmu", "type": "PERF_TYPE_HARDWARE", "config": "PERF_COUNT_HW_CPU_CYCLES", "arm_arch_event_code": "0x11", "sample_period": 1000, "unit": "cycles", "semantic_tags": ["cycles", "rate_denominator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] },
+    { "event_key": "inst_retired", "display_name": "Instructions retired", "source": "pmu", "type": "PERF_TYPE_HARDWARE", "config": "PERF_COUNT_HW_INSTRUCTIONS", "arm_arch_event_code": "0x08", "sample_period": 1000, "unit": "instructions", "semantic_tags": ["instructions", "rate_denominator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] },
+    { "event_key": "stall_frontend", "display_name": "Frontend stall", "source": "pmu", "type": "PERF_TYPE_RAW", "config": "0x23", "arm_arch_event_code": "0x23", "sample_period": 1000, "unit": "cycles", "semantic_tags": ["stall", "frontend", "rate_numerator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] },
+    { "event_key": "stall_backend", "display_name": "Backend stall", "source": "pmu", "type": "PERF_TYPE_RAW", "config": "0x24", "arm_arch_event_code": "0x24", "sample_period": 1000, "unit": "cycles", "semantic_tags": ["stall", "backend", "rate_numerator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] }
+  ]
+}

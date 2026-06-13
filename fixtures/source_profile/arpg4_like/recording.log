@@ -1,0 +1,4 @@
+2026-06-13T01:00:01Z arpg4-like fixture started
+2026-06-13T01:00:01Z opened cpu_cycles on cpu=0 sample_period=1000 buffer_pages=8192
+2026-06-13T01:00:01Z opened inst_retired on cpu=0 sample_period=1000 buffer_pages=8192
+2026-06-13T01:00:06Z arpg4-like fixture finalized samples=5 lost=0

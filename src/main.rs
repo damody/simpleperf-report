@@ -3,16 +3,35 @@ mod frame_graph;
 mod html_writer;
 mod model;
 mod record_data;
+mod source_profile;
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use log::info;
 
 #[derive(Parser, Debug)]
-#[command(name = "simpleperf_report", about = "Generate HTML flamegraph report from perf.data")]
-struct Args {
+#[command(
+    name = "simpleperf_report",
+    about = "Generate HTML flamegraph report from perf.data"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    legacy: LegacyArgs,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Generate source-line reports from an MProfiler source profile bundle.
+    Source(source_profile::cli::SourceArgs),
+}
+
+#[derive(Parser, Debug)]
+struct LegacyArgs {
     /// Input perf.data file(s)
     #[arg(short = 'i', long = "record_file", default_value = "perf.data")]
     record_files: Vec<String>,
@@ -22,11 +41,19 @@ struct Args {
     report_path: String,
 
     /// Min percentage of functions shown in the report
-    #[arg(long = "min_func_percent", alias = "min-func-percent", default_value = "0.01")]
+    #[arg(
+        long = "min_func_percent",
+        alias = "min-func-percent",
+        default_value = "0.01"
+    )]
     min_func_percent: f64,
 
     /// Min percentage of callchains shown in the report
-    #[arg(long = "min_callchain_percent", alias = "min-callchain-percent", default_value = "0.01")]
+    #[arg(
+        long = "min_callchain_percent",
+        alias = "min-callchain-percent",
+        default_value = "0.01"
+    )]
     min_callchain_percent: f64,
 
     /// Don't open report in browser
@@ -92,7 +119,7 @@ fn find_dll_dir() -> PathBuf {
     cwd
 }
 
-fn apply_options(lib: &ffi::ReportLib, args: &Args) -> Result<()> {
+fn apply_options(lib: &ffi::ReportLib, args: &LegacyArgs) -> Result<()> {
     if args.show_art_frames {
         lib.show_art_frames(true);
     }
@@ -105,7 +132,7 @@ fn apply_options(lib: &ffi::ReportLib, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn apply_post_record_options(lib: &ffi::ReportLib, args: &Args) -> Result<()> {
+fn apply_post_record_options(lib: &ffi::ReportLib, args: &LegacyArgs) -> Result<()> {
     if let Some(ref mode) = args.trace_offcpu {
         lib.set_trace_offcpu_mode(mode)?;
     }
@@ -115,7 +142,7 @@ fn apply_post_record_options(lib: &ffi::ReportLib, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn run(args: Args) -> Result<()> {
+fn run_legacy(args: LegacyArgs) -> Result<()> {
     let dll_dir = find_dll_dir();
     info!("DLL directory: {:?}", dll_dir);
 
@@ -169,9 +196,14 @@ fn run(args: Args) -> Result<()> {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let args = Args::parse();
+    let cli = Cli::parse();
 
-    if let Err(e) = run(args) {
+    let result = match cli.command {
+        Some(Command::Source(args)) => source_profile::cli::run_source_command(args),
+        None => run_legacy(cli.legacy),
+    };
+
+    if let Err(e) = result {
         eprintln!("Error: {:#}", e);
         std::process::exit(1);
     }

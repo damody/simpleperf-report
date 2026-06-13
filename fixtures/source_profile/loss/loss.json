@@ -1,0 +1,39 @@
+{
+  "session_id": "fixture-loss-001",
+  "totals": {
+    "pmu_lost_records": 9,
+    "ring_buffer_overruns": 1,
+    "reader_lag_records": 3,
+    "spe_aux_truncations": 0,
+    "spe_decode_errors": 2,
+    "dropped_records": 4
+  },
+  "by_event_cpu": [
+    {
+      "event_key": "cpu_cycles",
+      "cpu": 0,
+      "run_id": "run-cycles-cpu0",
+      "counts": {
+        "pmu_lost_records": 7,
+        "ring_buffer_overruns": 1,
+        "reader_lag_records": 3,
+        "spe_aux_truncations": 0,
+        "spe_decode_errors": 0,
+        "dropped_records": 4
+      }
+    },
+    {
+      "event_key": "spe",
+      "cpu": 0,
+      "run_id": "run-spe-cpu0",
+      "counts": {
+        "pmu_lost_records": 0,
+        "ring_buffer_overruns": 0,
+        "reader_lag_records": 0,
+        "spe_aux_truncations": 0,
+        "spe_decode_errors": 2,
+        "dropped_records": 0
+      }
+    }
+  ]
+}

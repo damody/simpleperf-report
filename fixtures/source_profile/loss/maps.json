@@ -1,0 +1,17 @@
+{
+  "session_id": "fixture-loss-001",
+  "maps": [
+    {
+      "mapping_id": 1,
+      "start": 70368744177664,
+      "end": 70368744243200,
+      "permissions": "r-xp",
+      "offset": 0,
+      "device": "fd:00",
+      "inode": 10001,
+      "path": "/data/app/com.example.fixture/lib/arm64/libfixture.so",
+      "module_id": "libfixture.so",
+      "load_bias": 0
+    }
+  ]
+}

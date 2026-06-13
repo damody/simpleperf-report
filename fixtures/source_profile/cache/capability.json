@@ -1,0 +1,42 @@
+{
+  "session_id": "fixture-cache-001",
+  "cpus": [
+    {
+      "cpu": 0,
+      "cluster": "little",
+      "summary": {
+        "spe": false,
+        "cycles": true,
+        "instructions": true,
+        "cache": true,
+        "branch": false,
+        "callchain": true,
+        "source_sample_fields": true
+      },
+      "details": [
+        { "event_key": "l1d_cache_access", "raw_event_name": "L1D_CACHE", "event_source": "perf_event_open", "type": "PERF_TYPE_RAW", "config": "0x04", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null },
+        { "event_key": "l1d_cache_refill", "raw_event_name": "L1D_CACHE_REFILL", "event_source": "perf_event_open", "type": "PERF_TYPE_RAW", "config": "0x03", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null },
+        { "event_key": "l2d_cache_access", "raw_event_name": "L2D_CACHE", "event_source": "perf_event_open", "type": "PERF_TYPE_RAW", "config": "0x16", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null },
+        { "event_key": "l2d_cache_refill", "raw_event_name": "L2D_CACHE_REFILL", "event_source": "perf_event_open", "type": "PERF_TYPE_RAW", "config": "0x17", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null },
+        { "event_key": "l3d_cache_access", "raw_event_name": "L3D_CACHE", "event_source": "perf_event_open", "type": "PERF_TYPE_RAW", "config": "0x2b", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null },
+        { "event_key": "l3d_cache_refill", "raw_event_name": "L3D_CACHE_REFILL", "event_source": "perf_event_open", "type": "PERF_TYPE_RAW", "config": "0x2a", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null }
+      ],
+      "spe": null
+    }
+  ],
+  "clusters": [
+    {
+      "cluster": "little",
+      "cpus": [0],
+      "summary": {
+        "spe": false,
+        "cycles": true,
+        "instructions": true,
+        "cache": true,
+        "branch": false,
+        "callchain": true,
+        "source_sample_fields": true
+      }
+    }
+  ]
+}

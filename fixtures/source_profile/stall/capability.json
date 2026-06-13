@@ -1,0 +1,40 @@
+{
+  "session_id": "fixture-stall-001",
+  "cpus": [
+    {
+      "cpu": 0,
+      "cluster": "little",
+      "summary": {
+        "spe": false,
+        "cycles": true,
+        "instructions": true,
+        "cache": false,
+        "branch": false,
+        "callchain": true,
+        "source_sample_fields": true
+      },
+      "details": [
+        { "event_key": "cpu_cycles", "raw_event_name": "CPU_CYCLES", "event_source": "perf_event_open", "type": "PERF_TYPE_HARDWARE", "config": "PERF_COUNT_HW_CPU_CYCLES", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null },
+        { "event_key": "inst_retired", "raw_event_name": "INST_RETIRED", "event_source": "perf_event_open", "type": "PERF_TYPE_HARDWARE", "config": "PERF_COUNT_HW_INSTRUCTIONS", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null },
+        { "event_key": "stall_frontend", "raw_event_name": "STALL_FRONTEND", "event_source": "perf_event_open", "type": "PERF_TYPE_RAW", "config": "0x23", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null },
+        { "event_key": "stall_backend", "raw_event_name": "STALL_BACKEND", "event_source": "perf_event_open", "type": "PERF_TYPE_RAW", "config": "0x24", "supported": true, "errno": null, "failure_reason": null, "kernel_path": null, "sysfs_path": null }
+      ],
+      "spe": null
+    }
+  ],
+  "clusters": [
+    {
+      "cluster": "little",
+      "cpus": [0],
+      "summary": {
+        "spe": false,
+        "cycles": true,
+        "instructions": true,
+        "cache": false,
+        "branch": false,
+        "callchain": true,
+        "source_sample_fields": true
+      }
+    }
+  ]
+}

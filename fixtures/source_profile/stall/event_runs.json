@@ -1,0 +1,9 @@
+{
+  "session_id": "fixture-stall-001",
+  "runs": [
+    { "run_id": "run-cycles-cpu0", "event_key": "cpu_cycles", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 20000000, "scaled_count": 20000000.0, "sample_count": 20, "sample_weight_sum": 20000, "lost_count": 0 },
+    { "run_id": "run-inst-cpu0", "event_key": "inst_retired", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 10000000, "scaled_count": 10000000.0, "sample_count": 10, "sample_weight_sum": 10000, "lost_count": 0 },
+    { "run_id": "run-fe-stall-cpu0", "event_key": "stall_frontend", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 2000000, "scaled_count": 2000000.0, "sample_count": 2, "sample_weight_sum": 2000, "lost_count": 0 },
+    { "run_id": "run-be-stall-cpu0", "event_key": "stall_backend", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 4000000, "scaled_count": 4000000.0, "sample_count": 4, "sample_weight_sum": 4000, "lost_count": 0 }
+  ]
+}

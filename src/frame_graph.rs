@@ -291,5 +291,3 @@ pub fn analyze_frames_wallclock_with_boundaries(
 
     frames
 }
-
-

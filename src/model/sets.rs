@@ -100,8 +100,7 @@ impl FunctionSet {
 
     /// Remove functions not in `left_func_ids`.
     pub fn trim_functions(&mut self, left_func_ids: &HashSet<i64>) {
-        self.id_to_func
-            .retain(|id, _| left_func_ids.contains(id));
+        self.id_to_func.retain(|id, _| left_func_ids.contains(id));
         // name_to_func is no longer needed after trimming
     }
 

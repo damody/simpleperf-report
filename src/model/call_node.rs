@@ -55,7 +55,11 @@ impl CallNode {
             e: self.event_count,
             s: self.subtree_event_count,
             f: self.func_id,
-            c: self.children.values().map(|c| c.gen_sample_info()).collect(),
+            c: self
+                .children
+                .values()
+                .map(|c| c.gen_sample_info())
+                .collect(),
         }
     }
 

@@ -106,10 +106,7 @@ impl ProcessScope {
                 }
             }
         }
-        self.threads = by_name
-            .into_values()
-            .map(|t| (t.tid, t))
-            .collect();
+        self.threads = by_name.into_values().map(|t| (t.tid, t)).collect();
     }
 }
 

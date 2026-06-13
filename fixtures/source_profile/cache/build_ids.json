@@ -1,0 +1,6 @@
+{
+  "session_id": "fixture-cache-001",
+  "modules": [
+    { "module_id": "libfixture.so", "runtime_path": "/data/app/com.example.fixture/lib/arm64/libfixture.so", "build_id": "ec4fe5c57bac4c4b45450bc88ed059f143ea286c", "soname": "libfixture.so", "file_size": 7480, "mtime_utc": "2026-06-13T00:00:00Z", "debug_elf_candidate_path": "debug/libfixture.so", "match_status": "hinted" }
+  ]
+}

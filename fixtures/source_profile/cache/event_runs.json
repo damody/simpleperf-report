@@ -1,0 +1,11 @@
+{
+  "session_id": "fixture-cache-001",
+  "runs": [
+    { "run_id": "run-l1-access-cpu0", "event_key": "l1d_cache_access", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 10000, "scaled_count": 10000.0, "sample_count": 10, "sample_weight_sum": 10000, "lost_count": 0 },
+    { "run_id": "run-l1-refill-cpu0", "event_key": "l1d_cache_refill", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 1000, "scaled_count": 1000.0, "sample_count": 1, "sample_weight_sum": 1000, "lost_count": 0 },
+    { "run_id": "run-l2-access-cpu0", "event_key": "l2d_cache_access", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 4000, "scaled_count": 4000.0, "sample_count": 4, "sample_weight_sum": 4000, "lost_count": 0 },
+    { "run_id": "run-l2-refill-cpu0", "event_key": "l2d_cache_refill", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 800, "scaled_count": 800.0, "sample_count": 1, "sample_weight_sum": 800, "lost_count": 0 },
+    { "run_id": "run-l3-access-cpu0", "event_key": "l3d_cache_access", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 1000, "scaled_count": 1000.0, "sample_count": 1, "sample_weight_sum": 1000, "lost_count": 0 },
+    { "run_id": "run-l3-refill-cpu0", "event_key": "l3d_cache_refill", "cpu": 0, "pid_scope": 4242, "tid_scope": null, "start_timestamp_ns": 1000000000, "end_timestamp_ns": 6000000000, "time_enabled_ns": 5000000000, "time_running_ns": 5000000000, "raw_count": 100, "scaled_count": 100.0, "sample_count": 1, "sample_weight_sum": 100, "lost_count": 0 }
+  ]
+}

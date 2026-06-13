@@ -1,0 +1,35 @@
+{
+  "session_id": "fixture-unresolved-001",
+  "metrics": [
+    {
+      "metric_key": "cpi",
+      "display_name": "CPI",
+      "formula": "cpu_cycles / inst_retired",
+      "unit": "cycles/instruction",
+      "required_events": ["cpu_cycles", "inst_retired"],
+      "fallback_events": [],
+      "missing_behavior": "Missing when either event is unsupported; Undefined when instructions are zero",
+      "physical_meaning": "平均每退休一條指令消耗的 CPU cycles；越高通常代表等待或低效率越多。"
+    },
+    {
+      "metric_key": "mips",
+      "display_name": "MIPS",
+      "formula": "inst_retired / effective_time_seconds / 1000000",
+      "unit": "million instructions/s",
+      "required_events": ["inst_retired"],
+      "fallback_events": [],
+      "missing_behavior": "Missing when instructions or effective time are unavailable",
+      "physical_meaning": "每秒退休的百萬指令數；依有效時間基準估算。"
+    },
+    {
+      "metric_key": "mcps",
+      "display_name": "MCPS",
+      "formula": "cpu_cycles / effective_time_seconds / 1000000",
+      "unit": "million cycles/s",
+      "required_events": ["cpu_cycles"],
+      "fallback_events": [],
+      "missing_behavior": "Missing when cycles or effective time are unavailable",
+      "physical_meaning": "每秒累積的百萬 CPU cycles；用來比較同一時間基準下的 CPU 活動量。"
+    }
+  ]
+}

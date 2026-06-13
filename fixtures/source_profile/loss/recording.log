@@ -1,0 +1,6 @@
+2026-06-13T00:50:01Z loss fixture started
+2026-06-13T00:50:01Z opened cpu_cycles on cpu=0 sample_period=1000 buffer_pages=8192
+2026-06-13T00:50:02Z ring-buffer overrun detected cpu=0 event=cpu_cycles lost=7
+2026-06-13T00:50:03Z reader lag detected cpu=0 records=3
+2026-06-13T00:50:04Z SPE decode error count=2
+2026-06-13T00:50:06Z loss fixture finalized samples=5 lost=9 dropped=4

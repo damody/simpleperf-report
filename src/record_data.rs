@@ -5,9 +5,7 @@ use log::info;
 use serde::Serialize;
 
 use crate::ffi::ReportLib;
-use crate::frame_graph::{
-    self, FrameGraphEventInfo, ThreadSamples, TimedSample,
-};
+use crate::frame_graph::{self, FrameGraphEventInfo, ThreadSamples, TimedSample};
 use crate::model::event_scope::{EventScope, EventScopeInfo};
 use crate::model::sets::{FunctionSet, LibSet};
 
@@ -103,8 +101,7 @@ impl RecordData {
                     Some(id) => id,
                     None => {
                         let build_id = lib.get_build_id_for_path(&entry.symbol.dso_name)?;
-                        self.libs
-                            .add_lib(entry.symbol.dso_name.clone(), build_id)
+                        self.libs.add_lib(entry.symbol.dso_name.clone(), build_id)
                     }
                 };
                 let func_id = self.functions.get_func_id(
@@ -173,10 +170,7 @@ impl RecordData {
                     }
                 }
             }
-            event.processes = new_processes
-                .into_values()
-                .map(|p| (p.pid, p))
-                .collect();
+            event.processes = new_processes.into_values().map(|p| (p.pid, p)).collect();
         }
     }
 
@@ -438,10 +432,8 @@ impl RecordData {
                     .collect();
                 sorted_samples.sort_by_key(|s| s.time);
 
-                let frames = frame_graph::analyze_frames_with_boundaries(
-                    &sorted_samples,
-                    &rhi_boundaries,
-                );
+                let frames =
+                    frame_graph::analyze_frames_with_boundaries(&sorted_samples, &rhi_boundaries);
 
                 let marker_name = get_name(marker_fid);
                 info!(
@@ -560,10 +552,8 @@ impl RecordData {
                 samples
             };
 
-            let frames = frame_graph::analyze_frames_wallclock_with_boundaries(
-                &merged,
-                &rhi_boundaries,
-            );
+            let frames =
+                frame_graph::analyze_frames_wallclock_with_boundaries(&merged, &rhi_boundaries);
 
             let marker_name = get_name(marker_fid);
             info!(

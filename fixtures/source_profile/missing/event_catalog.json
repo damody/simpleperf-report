@@ -1,0 +1,47 @@
+{
+  "session_id": "fixture-missing-001",
+  "events": [
+    {
+      "event_key": "cpu_cycles",
+      "display_name": "CPU cycles",
+      "source": "pmu",
+      "type": "PERF_TYPE_HARDWARE",
+      "config": "PERF_COUNT_HW_CPU_CYCLES",
+      "arm_arch_event_code": "0x11",
+      "sample_period": 1000,
+      "unit": "cycles",
+      "semantic_tags": ["cycles", "rate_denominator"],
+      "per_cpu_support": [
+        { "cpu": 0, "supported": true, "reason": null }
+      ]
+    },
+    {
+      "event_key": "inst_retired",
+      "display_name": "Instructions retired",
+      "source": "pmu",
+      "type": "PERF_TYPE_HARDWARE",
+      "config": "PERF_COUNT_HW_INSTRUCTIONS",
+      "arm_arch_event_code": "0x08",
+      "sample_period": 1000,
+      "unit": "instructions",
+      "semantic_tags": ["instructions", "rate_denominator"],
+      "per_cpu_support": [
+        { "cpu": 0, "supported": true, "reason": null }
+      ]
+    },
+    {
+      "event_key": "l3d_cache_access",
+      "display_name": "L3D cache access",
+      "source": "pmu",
+      "type": "PERF_TYPE_RAW",
+      "config": "0x2b",
+      "arm_arch_event_code": "0x2b",
+      "sample_period": 1000,
+      "unit": "accesses",
+      "semantic_tags": ["cache_access", "l3d", "rate_denominator"],
+      "per_cpu_support": [
+        { "cpu": 0, "supported": false, "reason": "Kernel rejected event-open with EINVAL" }
+      ]
+    }
+  ]
+}

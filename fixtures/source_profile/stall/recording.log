@@ -1,0 +1,3 @@
+2026-06-13T00:20:01Z stall fixture started
+2026-06-13T00:20:01Z opened cpu_cycles inst_retired stall_frontend stall_backend on cpu=0
+2026-06-13T00:20:06Z stall fixture finalized samples=36 lost=0

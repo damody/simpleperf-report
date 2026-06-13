@@ -1,0 +1,17 @@
+{
+  "session_id": "fixture-arpg4-like-001",
+  "maps": [
+    {
+      "mapping_id": 1,
+      "start": 70368744177664,
+      "end": 70368744243200,
+      "permissions": "r-xp",
+      "offset": 0,
+      "device": "fd:00",
+      "inode": 10001,
+      "path": "/data/app/com.EpicLRT.ActionRPGSample/lib/arm64/libUE4.so",
+      "module_id": "libUE4.so",
+      "load_bias": 0
+    }
+  ]
+}

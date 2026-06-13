@@ -1,0 +1,752 @@
+#![allow(dead_code)]
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use super::sample_stream::{PmuSample, SpeSample};
+use super::schema::SourceProfileEventCatalog;
+
+#[derive(Debug, Clone)]
+pub struct SourceLineKey {
+    pub file: PathBuf,
+    pub line: u32,
+    pub function: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MetricValue {
+    Number(f64),
+    Missing(String),
+    Unresolved(String),
+    Undefined(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricSemantics {
+    Missing,
+    Unresolved,
+    Zero,
+    NonZero,
+    Undefined,
+}
+
+pub fn classify_metric_value(value: &MetricValue) -> MetricSemantics {
+    match value {
+        MetricValue::Number(value) if *value == 0.0 => MetricSemantics::Zero,
+        MetricValue::Number(_) => MetricSemantics::NonZero,
+        MetricValue::Missing(_) => MetricSemantics::Missing,
+        MetricValue::Unresolved(_) => MetricSemantics::Unresolved,
+        MetricValue::Undefined(_) => MetricSemantics::Undefined,
+    }
+}
+
+pub fn source_line_metric_value(
+    metric_key: &str,
+    capability_available: bool,
+    attribution_resolved: bool,
+    numeric_value: Option<f64>,
+) -> MetricValue {
+    if !capability_available {
+        return MetricValue::Missing(format!("{metric_key} capability is unavailable"));
+    }
+    if !attribution_resolved {
+        return MetricValue::Unresolved(format!(
+            "{metric_key} samples exist but source attribution failed"
+        ));
+    }
+    MetricValue::Number(numeric_value.unwrap_or(0.0))
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceLineMetrics {
+    pub key: SourceLineKey,
+    pub code: String,
+    pub values: BTreeMap<String, MetricValue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceLineReportRow {
+    pub file: PathBuf,
+    pub line_number: u32,
+    pub function: Option<String>,
+    pub module_id: Option<String>,
+    pub thread_ids: Vec<u32>,
+    pub cpu_ids: Vec<u32>,
+    pub code: String,
+    pub pmu_values: BTreeMap<String, MetricValue>,
+    pub spe_values: BTreeMap<String, MetricValue>,
+    pub status_flags: Vec<LineStatusFlag>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct FileSummary {
+    pub file: PathBuf,
+    pub total_self_weight: f64,
+    pub total_accumulated_weight: f64,
+    pub sample_count: u64,
+    pub nonzero_line_count: u64,
+    pub unresolved_count: u64,
+    pub missing_metric_count: u64,
+}
+
+pub fn summarize_files(rows: &[SourceLineReportRow]) -> BTreeMap<PathBuf, FileSummary> {
+    let mut summaries = BTreeMap::new();
+    for row in rows {
+        let summary: &mut FileSummary =
+            summaries
+                .entry(row.file.clone())
+                .or_insert_with(|| FileSummary {
+                    file: row.file.clone(),
+                    ..FileSummary::default()
+                });
+        let mut row_has_nonzero = false;
+        for value in row.pmu_values.values().chain(row.spe_values.values()) {
+            match classify_metric_value(value) {
+                MetricSemantics::NonZero => {
+                    row_has_nonzero = true;
+                    if let MetricValue::Number(value) = value {
+                        summary.total_self_weight += *value;
+                    }
+                }
+                MetricSemantics::Missing => summary.missing_metric_count += 1,
+                MetricSemantics::Unresolved => summary.unresolved_count += 1,
+                MetricSemantics::Zero | MetricSemantics::Undefined => {}
+            }
+        }
+        if row_has_nonzero {
+            summary.nonzero_line_count += 1;
+            summary.sample_count += 1;
+        }
+    }
+    summaries
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct FunctionSummary {
+    pub function: String,
+    pub file: PathBuf,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub module_id: Option<String>,
+    pub self_weight: f64,
+    pub accumulated_weight: f64,
+    pub sample_count: u64,
+    pub hot_lines: Vec<u32>,
+}
+
+pub fn summarize_functions(
+    rows: &[SourceLineReportRow],
+) -> BTreeMap<(PathBuf, String), FunctionSummary> {
+    let mut summaries = BTreeMap::new();
+    for row in rows {
+        let function = row
+            .function
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let key = (row.file.clone(), function.clone());
+        let summary: &mut FunctionSummary =
+            summaries.entry(key).or_insert_with(|| FunctionSummary {
+                function,
+                file: row.file.clone(),
+                line_start: row.line_number,
+                line_end: row.line_number,
+                module_id: row.module_id.clone(),
+                ..FunctionSummary::default()
+            });
+        summary.line_start = summary.line_start.min(row.line_number);
+        summary.line_end = summary.line_end.max(row.line_number);
+
+        let mut row_self = 0.0;
+        for value in row.pmu_values.values().chain(row.spe_values.values()) {
+            if let MetricValue::Number(value) = value {
+                row_self += *value;
+            }
+        }
+        if row_self > 0.0 {
+            summary.self_weight += row_self;
+            summary.sample_count += 1;
+            summary.hot_lines.push(row.line_number);
+        }
+    }
+    summaries
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineStatusFlag {
+    NonZero,
+    Missing,
+    Unresolved,
+    Undefined,
+    LossWarning,
+}
+
+impl SourceLineReportRow {
+    pub fn refresh_status_flags(&mut self) {
+        let mut flags = Vec::new();
+        for value in self.pmu_values.values().chain(self.spe_values.values()) {
+            match classify_metric_value(value) {
+                MetricSemantics::Missing => push_unique(&mut flags, LineStatusFlag::Missing),
+                MetricSemantics::Unresolved => push_unique(&mut flags, LineStatusFlag::Unresolved),
+                MetricSemantics::Zero => {}
+                MetricSemantics::NonZero => push_unique(&mut flags, LineStatusFlag::NonZero),
+                MetricSemantics::Undefined => push_unique(&mut flags, LineStatusFlag::Undefined),
+            }
+        }
+        self.status_flags = flags;
+    }
+}
+
+fn push_unique(flags: &mut Vec<LineStatusFlag>, flag: LineStatusFlag) {
+    if !flags.contains(&flag) {
+        flags.push(flag);
+    }
+}
+
+pub trait MetricAggregator {
+    fn line_metrics(&self) -> &[SourceLineMetrics];
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct PercentageMetrics {
+    pub p_pct: f64,
+    pub acc_p_pct: f64,
+    pub file_p_pct: f64,
+    pub file_acc_p_pct: f64,
+}
+
+pub fn compute_percentages(
+    self_weight: f64,
+    accumulated_weight: f64,
+    total_self_weight: f64,
+    total_accumulated_weight: f64,
+    file_self_weight: f64,
+    file_accumulated_weight: f64,
+) -> PercentageMetrics {
+    PercentageMetrics {
+        p_pct: percent(self_weight, total_self_weight),
+        acc_p_pct: percent(accumulated_weight, total_accumulated_weight),
+        file_p_pct: percent(self_weight, file_self_weight),
+        file_acc_p_pct: percent(accumulated_weight, file_accumulated_weight),
+    }
+}
+
+pub fn derive_pmu_metrics(
+    weights: &BTreeMap<String, u64>,
+    effective_time_seconds: Option<f64>,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    insert_ratio(
+        &mut values,
+        "cpi",
+        weights,
+        "cpu_cycles",
+        "inst_retired",
+        1.0,
+    );
+    insert_cache_hit_rate(
+        &mut values,
+        "l1d_cache_hit_rate",
+        weights,
+        "l1d_cache_access",
+        "l1d_cache_refill",
+    );
+    insert_cache_hit_rate(
+        &mut values,
+        "l2d_cache_hit_rate",
+        weights,
+        "l2d_cache_access",
+        "l2d_cache_refill",
+    );
+    insert_cache_hit_rate(
+        &mut values,
+        "l3d_cache_hit_rate",
+        weights,
+        "l3d_cache_access",
+        "l3d_cache_refill",
+    );
+    insert_ratio(
+        &mut values,
+        "branch_miss_rate",
+        weights,
+        "branch_mispredict",
+        "branch_retired",
+        1.0,
+    );
+    insert_ratio(
+        &mut values,
+        "mpki",
+        weights,
+        "l1d_cache_refill",
+        "inst_retired",
+        1000.0,
+    );
+
+    insert_rate(
+        &mut values,
+        "mips",
+        weights.get("inst_retired").copied(),
+        effective_time_seconds,
+        1_000_000.0,
+    );
+    insert_rate(
+        &mut values,
+        "mcps",
+        weights.get("cpu_cycles").copied(),
+        effective_time_seconds,
+        1_000_000.0,
+    );
+    values
+}
+
+fn insert_ratio(
+    values: &mut BTreeMap<String, MetricValue>,
+    metric_key: &str,
+    weights: &BTreeMap<String, u64>,
+    numerator_key: &str,
+    denominator_key: &str,
+    scale: f64,
+) {
+    let Some(numerator) = weights.get(numerator_key).copied() else {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Missing(format!("{numerator_key} is missing")),
+        );
+        return;
+    };
+    let Some(denominator) = weights.get(denominator_key).copied() else {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Missing(format!("{denominator_key} is missing")),
+        );
+        return;
+    };
+    if denominator == 0 {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Undefined(format!("{denominator_key} is zero")),
+        );
+        return;
+    }
+    values.insert(
+        metric_key.to_string(),
+        MetricValue::Number(numerator as f64 / denominator as f64 * scale),
+    );
+}
+
+fn insert_cache_hit_rate(
+    values: &mut BTreeMap<String, MetricValue>,
+    metric_key: &str,
+    weights: &BTreeMap<String, u64>,
+    access_key: &str,
+    refill_key: &str,
+) {
+    let Some(access) = weights.get(access_key).copied() else {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Missing(format!("{access_key} is missing")),
+        );
+        return;
+    };
+    let Some(refill) = weights.get(refill_key).copied() else {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Missing(format!("{refill_key} is missing")),
+        );
+        return;
+    };
+    if access == 0 {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Undefined(format!("{access_key} is zero")),
+        );
+        return;
+    }
+    values.insert(
+        metric_key.to_string(),
+        MetricValue::Number((access.saturating_sub(refill)) as f64 / access as f64),
+    );
+}
+
+fn insert_rate(
+    values: &mut BTreeMap<String, MetricValue>,
+    metric_key: &str,
+    numerator: Option<u64>,
+    seconds: Option<f64>,
+    divisor: f64,
+) {
+    let Some(numerator) = numerator else {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Missing("required event is missing".to_string()),
+        );
+        return;
+    };
+    let Some(seconds) = seconds else {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Missing("effective time is missing".to_string()),
+        );
+        return;
+    };
+    if seconds <= 0.0 {
+        values.insert(
+            metric_key.to_string(),
+            MetricValue::Undefined("effective time is zero".to_string()),
+        );
+        return;
+    }
+    values.insert(
+        metric_key.to_string(),
+        MetricValue::Number(numerator as f64 / seconds / divisor),
+    );
+}
+
+fn percent(value: f64, denominator: f64) -> f64 {
+    if denominator > 0.0 {
+        value / denominator * 100.0
+    } else {
+        0.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PmuAddressKey {
+    pub mapping_id: u64,
+    pub ip: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct PmuAddressAggregate {
+    pub sample_count: u64,
+    pub self_weight_by_event: BTreeMap<String, u64>,
+    pub accumulated_weight_by_event: BTreeMap<String, u64>,
+}
+
+pub fn aggregate_pmu_by_address(
+    samples: &[PmuSample],
+    event_catalog: &SourceProfileEventCatalog,
+) -> BTreeMap<PmuAddressKey, PmuAddressAggregate> {
+    let mut rows = BTreeMap::new();
+    for sample in samples {
+        let event_key = event_catalog
+            .events
+            .get(sample.event_key_ref as usize)
+            .map(|event| event.event_key.as_str())
+            .unwrap_or("unknown_event")
+            .to_string();
+        let key = PmuAddressKey {
+            mapping_id: sample.mapping_id,
+            ip: sample.ip,
+        };
+        let row: &mut PmuAddressAggregate = rows.entry(key).or_default();
+        row.sample_count += 1;
+        *row.self_weight_by_event
+            .entry(event_key.clone())
+            .or_default() += sample.period_or_weight;
+
+        for callchain_ip in &sample.callchain_ips {
+            let callchain_key = PmuAddressKey {
+                mapping_id: sample.mapping_id,
+                ip: *callchain_ip,
+            };
+            let callchain_row: &mut PmuAddressAggregate = rows.entry(callchain_key).or_default();
+            *callchain_row
+                .accumulated_weight_by_event
+                .entry(event_key.clone())
+                .or_default() += sample.period_or_weight;
+        }
+    }
+    rows
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SpeAddressAggregate {
+    pub sample_count: u64,
+    pub latency_cycles_sum: u64,
+    pub latency_sample_count: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub branch_correct: u64,
+    pub branch_mispredict: u64,
+    pub data_source_counts: BTreeMap<u16, u64>,
+    pub operation_flags_or: u32,
+    pub event_flags_or: u64,
+    pub decode_error_count: u64,
+}
+
+pub fn aggregate_spe_by_address(
+    samples: &[SpeSample],
+) -> BTreeMap<PmuAddressKey, SpeAddressAggregate> {
+    let mut rows = BTreeMap::new();
+    for sample in samples {
+        let key = PmuAddressKey {
+            mapping_id: sample.mapping_id,
+            ip: sample.pc,
+        };
+        let row: &mut SpeAddressAggregate = rows.entry(key).or_default();
+        row.sample_count += 1;
+        if let Some(latency) = sample.latency_cycles {
+            row.latency_cycles_sum += u64::from(latency);
+            row.latency_sample_count += 1;
+        }
+        match sample.cache_result {
+            1 => row.cache_hits += 1,
+            2 => row.cache_misses += 1,
+            _ => {}
+        }
+        match sample.branch_result {
+            1 => row.branch_correct += 1,
+            2 => row.branch_mispredict += 1,
+            _ => {}
+        }
+        if sample.data_source != 0 {
+            *row.data_source_counts
+                .entry(sample.data_source)
+                .or_default() += 1;
+        }
+        row.operation_flags_or |= sample.operation_flags;
+        row.event_flags_or |= sample.event_flags;
+        if sample.decode_status != 0 {
+            row.decode_error_count += 1;
+        }
+    }
+    rows
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::source_profile::sample_stream::read_pmu_samples;
+
+    #[test]
+    fn aggregates_minimal_pmu_samples_by_address() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/source_profile/minimal");
+        let event_catalog: SourceProfileEventCatalog = serde_json::from_str(
+            &std::fs::read_to_string(root.join("event_catalog.json")).unwrap(),
+        )
+        .unwrap();
+        let (_, samples) = read_pmu_samples(&root.join("pmu_samples.bin")).unwrap();
+        let rows = aggregate_pmu_by_address(&samples, &event_catalog);
+        let cycles: u64 = rows
+            .values()
+            .map(|row| {
+                row.self_weight_by_event
+                    .get("cpu_cycles")
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum();
+        let instructions: u64 = rows
+            .values()
+            .map(|row| {
+                row.self_weight_by_event
+                    .get("inst_retired")
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum();
+        assert_eq!(cycles, 3000);
+        assert_eq!(instructions, 2000);
+        assert!(rows
+            .values()
+            .any(|row| row.accumulated_weight_by_event.contains_key("cpu_cycles")));
+    }
+
+    #[test]
+    fn aggregates_spe_samples_by_address() {
+        let samples = vec![
+            SpeSample {
+                flags: 0,
+                event_run_ref: 0,
+                pid: 1,
+                tid: 1,
+                cpu: 0,
+                mapping_id: 1,
+                timestamp_ns: 100,
+                pc: 0x1000,
+                latency_cycles: Some(10),
+                operation_flags: 1,
+                event_flags: 2,
+                cache_level: 1,
+                cache_result: 1,
+                branch_result: 3,
+                data_source: 7,
+                decode_status: 0,
+                raw_packet_offset: 0,
+            },
+            SpeSample {
+                flags: 0,
+                event_run_ref: 0,
+                pid: 1,
+                tid: 1,
+                cpu: 0,
+                mapping_id: 1,
+                timestamp_ns: 110,
+                pc: 0x1000,
+                latency_cycles: Some(30),
+                operation_flags: 4,
+                event_flags: 8,
+                cache_level: 1,
+                cache_result: 2,
+                branch_result: 2,
+                data_source: 7,
+                decode_status: 1,
+                raw_packet_offset: 0,
+            },
+        ];
+        let rows = aggregate_spe_by_address(&samples);
+        let row = rows
+            .get(&PmuAddressKey {
+                mapping_id: 1,
+                ip: 0x1000,
+            })
+            .unwrap();
+        assert_eq!(row.sample_count, 2);
+        assert_eq!(row.latency_cycles_sum, 40);
+        assert_eq!(row.cache_hits, 1);
+        assert_eq!(row.cache_misses, 1);
+        assert_eq!(row.branch_mispredict, 1);
+        assert_eq!(row.data_source_counts.get(&7), Some(&2));
+        assert_eq!(row.decode_error_count, 1);
+    }
+
+    #[test]
+    fn computes_global_and_file_local_percentages() {
+        let percentages = compute_percentages(5.0, 20.0, 100.0, 200.0, 10.0, 40.0);
+        assert_eq!(percentages.p_pct, 5.0);
+        assert_eq!(percentages.acc_p_pct, 10.0);
+        assert_eq!(percentages.file_p_pct, 50.0);
+        assert_eq!(percentages.file_acc_p_pct, 50.0);
+    }
+
+    #[test]
+    fn derives_pmu_metrics_without_turning_missing_into_zero() {
+        let weights = BTreeMap::from([
+            ("cpu_cycles".to_string(), 2000),
+            ("inst_retired".to_string(), 1000),
+            ("l1d_cache_access".to_string(), 100),
+            ("l1d_cache_refill".to_string(), 10),
+            ("branch_retired".to_string(), 50),
+            ("branch_mispredict".to_string(), 5),
+        ]);
+        let values = derive_pmu_metrics(&weights, Some(0.001));
+        assert!(matches!(values["cpi"], MetricValue::Number(2.0)));
+        assert!(
+            matches!(values["l1d_cache_hit_rate"], MetricValue::Number(v) if (v - 0.9).abs() < f64::EPSILON)
+        );
+        assert!(
+            matches!(values["branch_miss_rate"], MetricValue::Number(v) if (v - 0.1).abs() < f64::EPSILON)
+        );
+        assert!(matches!(values["mips"], MetricValue::Number(1.0)));
+        assert!(matches!(values["mcps"], MetricValue::Number(2.0)));
+        assert!(matches!(
+            values["l2d_cache_hit_rate"],
+            MetricValue::Missing(_)
+        ));
+    }
+
+    #[test]
+    fn classifies_missing_unresolved_and_true_zero() {
+        let missing = source_line_metric_value("l3d_cache_hit_rate", false, true, Some(1.0));
+        let unresolved = source_line_metric_value("cpu_cycles", true, false, Some(10.0));
+        let zero = source_line_metric_value("cpu_cycles", true, true, None);
+        let nonzero = source_line_metric_value("cpu_cycles", true, true, Some(10.0));
+
+        assert_eq!(classify_metric_value(&missing), MetricSemantics::Missing);
+        assert_eq!(
+            classify_metric_value(&unresolved),
+            MetricSemantics::Unresolved
+        );
+        assert_eq!(classify_metric_value(&zero), MetricSemantics::Zero);
+        assert_eq!(classify_metric_value(&nonzero), MetricSemantics::NonZero);
+    }
+
+    #[test]
+    fn source_line_report_row_refreshes_status_flags() {
+        let mut row = SourceLineReportRow {
+            file: PathBuf::from("fixture.cpp"),
+            line_number: 4,
+            function: Some("hot".to_string()),
+            module_id: Some("libfixture.so".to_string()),
+            thread_ids: vec![4242],
+            cpu_ids: vec![0],
+            code: "sum += values[i] * 3;".to_string(),
+            pmu_values: BTreeMap::from([
+                ("cpu_cycles".to_string(), MetricValue::Number(1000.0)),
+                (
+                    "l3d".to_string(),
+                    MetricValue::Missing("unsupported".to_string()),
+                ),
+            ]),
+            spe_values: BTreeMap::from([(
+                "spe_latency".to_string(),
+                MetricValue::Unresolved("no line".to_string()),
+            )]),
+            status_flags: Vec::new(),
+        };
+        row.refresh_status_flags();
+        assert!(row.status_flags.contains(&LineStatusFlag::NonZero));
+        assert!(row.status_flags.contains(&LineStatusFlag::Missing));
+        assert!(row.status_flags.contains(&LineStatusFlag::Unresolved));
+    }
+
+    #[test]
+    fn summarizes_files_from_line_rows() {
+        let rows = vec![
+            SourceLineReportRow {
+                file: PathBuf::from("a.cpp"),
+                line_number: 1,
+                function: None,
+                module_id: None,
+                thread_ids: vec![],
+                cpu_ids: vec![],
+                code: "x".to_string(),
+                pmu_values: BTreeMap::from([("cycles".to_string(), MetricValue::Number(10.0))]),
+                spe_values: BTreeMap::new(),
+                status_flags: vec![],
+            },
+            SourceLineReportRow {
+                file: PathBuf::from("a.cpp"),
+                line_number: 2,
+                function: None,
+                module_id: None,
+                thread_ids: vec![],
+                cpu_ids: vec![],
+                code: "y".to_string(),
+                pmu_values: BTreeMap::from([(
+                    "l3".to_string(),
+                    MetricValue::Missing("unsupported".to_string()),
+                )]),
+                spe_values: BTreeMap::new(),
+                status_flags: vec![],
+            },
+        ];
+        let summary = summarize_files(&rows);
+        assert_eq!(summary[&PathBuf::from("a.cpp")].nonzero_line_count, 1);
+        assert_eq!(summary[&PathBuf::from("a.cpp")].missing_metric_count, 1);
+    }
+
+    #[test]
+    fn summarizes_functions_from_line_rows() {
+        let rows = vec![SourceLineReportRow {
+            file: PathBuf::from("a.cpp"),
+            line_number: 7,
+            function: Some("foo".to_string()),
+            module_id: Some("liba.so".to_string()),
+            thread_ids: vec![],
+            cpu_ids: vec![],
+            code: "work();".to_string(),
+            pmu_values: BTreeMap::from([("cycles".to_string(), MetricValue::Number(10.0))]),
+            spe_values: BTreeMap::new(),
+            status_flags: vec![],
+        }];
+        let summary = summarize_functions(&rows);
+        let key = (PathBuf::from("a.cpp"), "foo".to_string());
+        assert_eq!(summary[&key].module_id.as_deref(), Some("liba.so"));
+        assert_eq!(summary[&key].line_start, 7);
+        assert_eq!(summary[&key].self_weight, 10.0);
+        assert_eq!(summary[&key].hot_lines, vec![7]);
+    }
+}

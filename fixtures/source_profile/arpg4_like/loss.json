@@ -1,0 +1,26 @@
+{
+  "session_id": "fixture-arpg4-like-001",
+  "totals": {
+    "pmu_lost_records": 0,
+    "ring_buffer_overruns": 0,
+    "reader_lag_records": 0,
+    "spe_aux_truncations": 0,
+    "spe_decode_errors": 0,
+    "dropped_records": 0
+  },
+  "by_event_cpu": [
+    {
+      "event_key": "cpu_cycles",
+      "cpu": 0,
+      "run_id": "run-cycles-cpu0",
+      "counts": {
+        "pmu_lost_records": 0,
+        "ring_buffer_overruns": 0,
+        "reader_lag_records": 0,
+        "spe_aux_truncations": 0,
+        "spe_decode_errors": 0,
+        "dropped_records": 0
+      }
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "session_id": "fixture-unresolved-001",
+  "modules": [
+    {
+      "module_id": "libfixture.so",
+      "runtime_path": "/data/app/com.example.fixture/lib/arm64/libfixture.so",
+      "build_id": "ffffffffffffffffffffffffffffffffffffffff",
+      "soname": "libfixture.so",
+      "file_size": 7480,
+      "mtime_utc": "2026-06-13T00:00:00Z",
+      "debug_elf_candidate_path": "debug/missing-libfixture.so",
+      "match_status": "build_id_mismatch"
+    }
+  ]
+}

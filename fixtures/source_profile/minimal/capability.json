@@ -1,0 +1,65 @@
+{
+  "session_id": "fixture-minimal-001",
+  "cpus": [
+    {
+      "cpu": 0,
+      "cluster": "little",
+      "summary": {
+        "spe": false,
+        "cycles": true,
+        "instructions": true,
+        "cache": true,
+        "branch": true,
+        "callchain": true,
+        "source_sample_fields": true
+      },
+      "details": [
+        {
+          "event_key": "cpu_cycles",
+          "raw_event_name": "CPU_CYCLES",
+          "event_source": "perf_event_open",
+          "type": "PERF_TYPE_HARDWARE",
+          "config": "PERF_COUNT_HW_CPU_CYCLES",
+          "supported": true,
+          "errno": null,
+          "failure_reason": null,
+          "kernel_path": "/proc/sys/kernel/perf_event_paranoid",
+          "sysfs_path": null
+        },
+        {
+          "event_key": "spe",
+          "raw_event_name": "arm_spe_0",
+          "event_source": "perf_event_open",
+          "type": "arm_spe_pmu",
+          "config": "0",
+          "supported": false,
+          "errno": 2,
+          "failure_reason": "SPE PMU device was not exposed by kernel",
+          "kernel_path": null,
+          "sysfs_path": "/sys/bus/event_source/devices/arm_spe_0"
+        }
+      ],
+      "spe": {
+        "device_path": "/sys/bus/event_source/devices/arm_spe_0",
+        "aux_supported": false,
+        "min_interval": null,
+        "raw_metadata": {}
+      }
+    }
+  ],
+  "clusters": [
+    {
+      "cluster": "little",
+      "cpus": [0],
+      "summary": {
+        "spe": false,
+        "cycles": true,
+        "instructions": true,
+        "cache": true,
+        "branch": true,
+        "callchain": true,
+        "source_sample_fields": true
+      }
+    }
+  ]
+}

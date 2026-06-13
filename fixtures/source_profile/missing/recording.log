@@ -1,0 +1,6 @@
+2026-06-13T00:30:01Z missing fixture started
+2026-06-13T00:30:01Z opened cpu_cycles on cpu=0 sample_period=1000 buffer_pages=8192
+2026-06-13T00:30:01Z opened inst_retired on cpu=0 sample_period=1000 buffer_pages=8192
+2026-06-13T00:30:01Z failed l3d_cache_access on cpu=0 errno=22 reason=EINVAL
+2026-06-13T00:30:01Z failed SPE open errno=2 reason=ENOENT
+2026-06-13T00:30:06Z missing fixture finalized samples=5 lost=0

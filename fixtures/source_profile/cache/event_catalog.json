@@ -1,0 +1,11 @@
+{
+  "session_id": "fixture-cache-001",
+  "events": [
+    { "event_key": "l1d_cache_access", "display_name": "L1D cache access", "source": "pmu", "type": "PERF_TYPE_RAW", "config": "0x04", "arm_arch_event_code": "0x04", "sample_period": 1000, "unit": "accesses", "semantic_tags": ["cache_access", "l1d", "rate_denominator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] },
+    { "event_key": "l1d_cache_refill", "display_name": "L1D cache refill", "source": "pmu", "type": "PERF_TYPE_RAW", "config": "0x03", "arm_arch_event_code": "0x03", "sample_period": 1000, "unit": "refills", "semantic_tags": ["cache_refill", "l1d", "rate_numerator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] },
+    { "event_key": "l2d_cache_access", "display_name": "L2D cache access", "source": "pmu", "type": "PERF_TYPE_RAW", "config": "0x16", "arm_arch_event_code": "0x16", "sample_period": 1000, "unit": "accesses", "semantic_tags": ["cache_access", "l2d", "rate_denominator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] },
+    { "event_key": "l2d_cache_refill", "display_name": "L2D cache refill", "source": "pmu", "type": "PERF_TYPE_RAW", "config": "0x17", "arm_arch_event_code": "0x17", "sample_period": 1000, "unit": "refills", "semantic_tags": ["cache_refill", "l2d", "rate_numerator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] },
+    { "event_key": "l3d_cache_access", "display_name": "L3D cache access", "source": "pmu", "type": "PERF_TYPE_RAW", "config": "0x2b", "arm_arch_event_code": "0x2b", "sample_period": 1000, "unit": "accesses", "semantic_tags": ["cache_access", "l3d", "rate_denominator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] },
+    { "event_key": "l3d_cache_refill", "display_name": "L3D cache refill", "source": "pmu", "type": "PERF_TYPE_RAW", "config": "0x2a", "arm_arch_event_code": "0x2a", "sample_period": 1000, "unit": "refills", "semantic_tags": ["cache_refill", "l3d", "rate_numerator"], "per_cpu_support": [{ "cpu": 0, "supported": true, "reason": null }] }
+  ]
+}

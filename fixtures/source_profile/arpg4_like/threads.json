@@ -1,0 +1,15 @@
+{
+  "session_id": "fixture-arpg4-like-001",
+  "threads": [
+    {
+      "pid": 4242,
+      "tid": 4242,
+      "tgid": 4242,
+      "thread_name": "GameThread",
+      "process_name": "com.EpicLRT.ActionRPGSample",
+      "first_seen_utc": "2026-06-13T01:00:01Z",
+      "last_seen_utc": "2026-06-13T01:00:06Z",
+      "cpu_affinity": [0]
+    }
+  ]
+}

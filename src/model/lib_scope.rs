@@ -29,7 +29,11 @@ impl LibScope {
         LibScopeInfo {
             lib_id: self.lib_id,
             event_count: self.event_count,
-            functions: self.functions.values().map(|f| f.gen_sample_info()).collect(),
+            functions: self
+                .functions
+                .values()
+                .map(|f| f.gen_sample_info())
+                .collect(),
         }
     }
 
@@ -67,7 +71,11 @@ impl FunctionScope {
     pub fn gen_sample_info(&self) -> FuncScopeInfo {
         FuncScopeInfo {
             f: self.func_id,
-            c: vec![self.sample_count, self.event_count, self.subtree_event_count],
+            c: vec![
+                self.sample_count,
+                self.event_count,
+                self.subtree_event_count,
+            ],
         }
     }
 

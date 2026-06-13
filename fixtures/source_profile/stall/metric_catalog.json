@@ -1,0 +1,10 @@
+{
+  "session_id": "fixture-stall-001",
+  "metrics": [
+    { "metric_key": "cpi", "display_name": "CPI", "formula": "cpu_cycles / inst_retired", "unit": "cycles/instruction", "required_events": ["cpu_cycles", "inst_retired"], "fallback_events": [], "missing_behavior": "Missing when cycles or instructions are unsupported; Undefined when instructions are zero", "physical_meaning": "平均每退休一條指令消耗的 CPU cycles。" },
+    { "metric_key": "fe_stall_rate", "display_name": "FE stall rate", "formula": "stall_frontend / cpu_cycles", "unit": "ratio", "required_events": ["stall_frontend", "cpu_cycles"], "fallback_events": [], "missing_behavior": "Missing when frontend stall or cycles are unsupported; Undefined when cycles are zero", "physical_meaning": "Frontend 無法供應可 issue operation 的 stall 比例近似。" },
+    { "metric_key": "be_stall_rate", "display_name": "BE stall rate", "formula": "stall_backend / cpu_cycles", "unit": "ratio", "required_events": ["stall_backend", "cpu_cycles"], "fallback_events": [], "missing_behavior": "Missing when backend stall or cycles are unsupported; Undefined when cycles are zero", "physical_meaning": "Backend 等待資料、執行資源或記憶體等原因造成無法推進的 stall 比例近似。" },
+    { "metric_key": "mips", "display_name": "MIPS", "formula": "inst_retired / effective_time_seconds / 1000000", "unit": "million instructions/s", "required_events": ["inst_retired"], "fallback_events": [], "missing_behavior": "Missing when instructions or effective time are unavailable", "physical_meaning": "每秒退休的百萬指令數。" },
+    { "metric_key": "mcps", "display_name": "MCPS", "formula": "cpu_cycles / effective_time_seconds / 1000000", "unit": "million cycles/s", "required_events": ["cpu_cycles"], "fallback_events": [], "missing_behavior": "Missing when cycles or effective time are unavailable", "physical_meaning": "每秒累積的百萬 CPU cycles。" }
+  ]
+}

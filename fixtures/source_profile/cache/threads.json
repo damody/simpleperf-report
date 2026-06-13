@@ -1,0 +1,6 @@
+{
+  "session_id": "fixture-cache-001",
+  "threads": [
+    { "pid": 4242, "tid": 4242, "tgid": 4242, "thread_name": "fixture-main", "process_name": "fixture", "first_seen_utc": "2026-06-13T00:10:01Z", "last_seen_utc": "2026-06-13T00:10:06Z", "cpu_affinity": [0] }
+  ]
+}

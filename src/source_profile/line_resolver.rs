@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -125,6 +128,213 @@ pub fn resolve_elf_address(
             elf_path.display()
         )
     })?;
+    resolve_with_loader(&loader, elf_path, relative_address)
+}
+
+pub struct CachedElfLineResolver {
+    symbolizer_path: Option<PathBuf>,
+    symbolizers: BTreeMap<PathBuf, SymbolizerProcess>,
+    loaders: BTreeMap<PathBuf, addr2line::Loader>,
+    locations: BTreeMap<(PathBuf, u64), Option<SourceLocation>>,
+}
+
+impl Default for CachedElfLineResolver {
+    fn default() -> Self {
+        Self {
+            symbolizer_path: find_llvm_symbolizer(),
+            symbolizers: BTreeMap::new(),
+            loaders: BTreeMap::new(),
+            locations: BTreeMap::new(),
+        }
+    }
+}
+
+impl CachedElfLineResolver {
+    pub fn resolve(
+        &mut self,
+        elf_path: &Path,
+        relative_address: u64,
+    ) -> Result<Option<SourceLocation>> {
+        let cache_key = (elf_path.to_path_buf(), relative_address);
+        if let Some(location) = self.locations.get(&cache_key) {
+            return Ok(location.clone());
+        }
+
+        if let Some(symbolizer_path) = self.symbolizer_path.clone() {
+            let location =
+                self.resolve_with_symbolizer(&symbolizer_path, elf_path, relative_address)?;
+            self.locations.insert(cache_key, location.clone());
+            return Ok(location);
+        }
+
+        if !self.loaders.contains_key(elf_path) {
+            let loader = addr2line::Loader::new(elf_path).map_err(|error| {
+                anyhow!(
+                    "Failed to load DWARF from '{}': {error}",
+                    elf_path.display()
+                )
+            })?;
+            self.loaders.insert(elf_path.to_path_buf(), loader);
+        }
+
+        let loader = self
+            .loaders
+            .get(elf_path)
+            .expect("loader inserted before lookup");
+        let location = resolve_with_loader(loader, elf_path, relative_address)?;
+        self.locations.insert(cache_key, location.clone());
+        Ok(location)
+    }
+
+    fn resolve_with_symbolizer(
+        &mut self,
+        symbolizer_path: &Path,
+        elf_path: &Path,
+        relative_address: u64,
+    ) -> Result<Option<SourceLocation>> {
+        if !self.symbolizers.contains_key(elf_path) {
+            let process = SymbolizerProcess::spawn(symbolizer_path, elf_path)?;
+            self.symbolizers.insert(elf_path.to_path_buf(), process);
+        }
+        let process = self
+            .symbolizers
+            .get_mut(elf_path)
+            .expect("symbolizer inserted before lookup");
+        process.resolve(relative_address)
+    }
+}
+
+struct SymbolizerProcess {
+    _child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl SymbolizerProcess {
+    fn spawn(symbolizer_path: &Path, elf_path: &Path) -> Result<Self> {
+        let mut child = Command::new(symbolizer_path)
+            .arg(format!("--obj={}", elf_path.display()))
+            .arg("--functions=linkage")
+            .arg("--inlining=false")
+            .arg("--demangle")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                anyhow!(
+                    "Failed to start llvm-symbolizer '{}' for '{}': {error}",
+                    symbolizer_path.display(),
+                    elf_path.display()
+                )
+            })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("llvm-symbolizer stdin unavailable"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("llvm-symbolizer stdout unavailable"))?;
+        Ok(Self {
+            _child: child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn resolve(&mut self, relative_address: u64) -> Result<Option<SourceLocation>> {
+        writeln!(self.stdin, "0x{relative_address:x}")?;
+        self.stdin.flush()?;
+
+        let function = read_symbolizer_line(&mut self.stdout)?;
+        let file_line = read_symbolizer_line(&mut self.stdout)?;
+        let mut separator = String::new();
+        let _ = self.stdout.read_line(&mut separator)?;
+
+        if function == "??" || file_line.starts_with("??:") {
+            return Ok(None);
+        }
+
+        let Some((file, line)) = parse_symbolizer_file_line(&file_line) else {
+            return Ok(None);
+        };
+        if line == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(SourceLocation {
+            file,
+            line,
+            function: Some(function),
+            inline_stack: Vec::new(),
+        }))
+    }
+}
+
+fn read_symbolizer_line(stdout: &mut BufReader<ChildStdout>) -> Result<String> {
+    let mut line = String::new();
+    stdout.read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn parse_symbolizer_file_line(text: &str) -> Option<(PathBuf, u32)> {
+    let mut parts = text.rsplitn(3, ':');
+    let _column = parts.next()?;
+    let line = parts.next()?.parse::<u32>().ok()?;
+    let file = parts.next()?;
+    Some((PathBuf::from(file), line))
+}
+
+fn find_llvm_symbolizer() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("MPROFILER_LLVM_SYMBOLIZER") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    for path in std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+    {
+        let candidate = path.join(if cfg!(windows) {
+            "llvm-symbolizer.exe"
+        } else {
+            "llvm-symbolizer"
+        });
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+    let ndk_root = PathBuf::from(local_app_data).join("Android/Sdk/ndk");
+    let Ok(entries) = std::fs::read_dir(ndk_root) else {
+        return None;
+    };
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .map(|path| {
+            path.join(if cfg!(windows) {
+                "toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-symbolizer.exe"
+            } else {
+                "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-symbolizer"
+            })
+        })
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.pop()
+}
+
+fn resolve_with_loader(
+    loader: &addr2line::Loader,
+    elf_path: &Path,
+    relative_address: u64,
+) -> Result<Option<SourceLocation>> {
     let mut frames = loader.find_frames(relative_address).map_err(|error| {
         anyhow!(
             "Failed to resolve address 0x{relative_address:x} in '{}': {error}",

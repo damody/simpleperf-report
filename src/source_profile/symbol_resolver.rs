@@ -219,7 +219,13 @@ fn make_match(
 }
 
 fn read_elf_build_id(path: &Path) -> Result<Option<String>> {
-    let data = fs::read(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
+    let file_handle =
+        fs::File::open(path).with_context(|| format!("Failed to open '{}'", path.display()))?;
+    let data = unsafe {
+        memmap2::MmapOptions::new()
+            .map(&file_handle)
+            .with_context(|| format!("Failed to mmap '{}'", path.display()))?
+    };
     let file = object::File::parse(&*data)
         .with_context(|| format!("Failed to parse ELF '{}'", path.display()))?;
     Ok(file

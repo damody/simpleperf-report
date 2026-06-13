@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::bundle::SourceProfileBundle;
-use super::line_resolver::{resolve_elf_address, resolve_source_path, runtime_address_to_relative};
+use super::line_resolver::{
+    resolve_source_path, runtime_address_to_relative, CachedElfLineResolver,
+};
 use super::metrics::{
     aggregate_pmu_by_address, aggregate_spe_by_address, compute_percentages, derive_pmu_metrics,
     MetricValue, PmuAddressAggregate, SpeAddressAggregate,
@@ -157,6 +159,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
 
     let elf_matches = load_elf_matches(bundle)?;
     let mut warnings = collect_quality_warnings(bundle);
+    let mut line_resolver = CachedElfLineResolver::default();
     for matched in elf_matches.values() {
         if matched.quality == ElfMatchQuality::Missing {
             warnings.push(format!("Debug ELF Missing for {}", matched.module_id));
@@ -176,6 +179,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 &source_roots,
                 &path_remaps,
                 &source_by_name,
+                &mut line_resolver,
                 key.mapping_id,
                 key.ip,
             )? {
@@ -211,6 +215,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 &source_roots,
                 &path_remaps,
                 &source_by_name,
+                &mut line_resolver,
                 key.mapping_id,
                 key.ip,
             )? {
@@ -269,6 +274,7 @@ fn resolve_key(
     source_roots: &[PathBuf],
     path_remaps: &[super::schema::PathRemap],
     source_by_name: &BTreeMap<String, PathBuf>,
+    line_resolver: &mut CachedElfLineResolver,
     mapping_id: u64,
     ip: u64,
 ) -> Result<Option<(PathBuf, u32, String, String)>> {
@@ -289,7 +295,8 @@ fn resolve_key(
     let Some(elf_path) = &matched.candidate_path else {
         return Ok(None);
     };
-    let Some(location) = resolve_elf_address(elf_path, relative.relative_address)
+    let Some(location) = line_resolver
+        .resolve(elf_path, relative.relative_address)
         .with_context(|| format!("Failed to resolve 0x{:x}", relative.relative_address))?
     else {
         return Ok(None);
@@ -709,6 +716,9 @@ fn discover_source_files(bundle: &SourceProfileBundle) -> Result<Vec<PathBuf>> {
 }
 
 fn collect_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    if should_skip_source_dir(dir) {
+        return Ok(());
+    }
     for entry in std::fs::read_dir(dir)
         .with_context(|| format!("Failed to read source directory '{}'", dir.display()))?
     {
@@ -721,6 +731,24 @@ fn collect_source_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn should_skip_source_dir(dir: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    matches!(
+        name,
+        ".git"
+            | ".vs"
+            | "Binaries"
+            | "DerivedDataCache"
+            | "Intermediate"
+            | "Saved"
+            | "Build"
+            | "target"
+            | "node_modules"
+    )
 }
 
 fn is_source_file(path: &Path) -> bool {

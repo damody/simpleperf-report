@@ -21,6 +21,7 @@ open = "5"
 object = "0.37"
 addr2line = "0.25"
 rust_xlsxwriter = "0.92"
+memmap2 = "0.9"
 
 [profile.release]
 opt-level = 3

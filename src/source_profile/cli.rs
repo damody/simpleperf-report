@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 use log::info;
 
+use super::annotated_source::write_annotated_sources;
 use super::bundle::SourceProfileBundle;
 use super::html_report::write_html_summary;
 use super::machine_report::{write_csv_exports, write_source_line_json};
@@ -56,6 +57,10 @@ pub struct SourceArgs {
     /// Highlight threshold for nonzero numeric metrics.
     #[arg(long = "nonzero-threshold", default_value = "0")]
     pub nonzero_threshold: f64,
+
+    /// Write annotated copies of sampled source files into this directory.
+    #[arg(long = "annotated-source-out")]
+    pub annotated_source_out: Option<PathBuf>,
 }
 
 pub fn run_source_command(args: SourceArgs) -> Result<()> {
@@ -109,6 +114,9 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
     if args.csv {
         write_csv_exports(&bundle, &args.out_dir.join("csv"))?;
     }
+    if let Some(output_dir) = &args.annotated_source_out {
+        write_annotated_sources(&bundle, output_dir)?;
+    }
     Ok(())
 }
 
@@ -143,6 +151,14 @@ fn validate_source_args(args: &SourceArgs) -> Result<()> {
             "Source report output path '{}' exists but is not a directory",
             args.out_dir.display()
         );
+    }
+    if let Some(output_dir) = &args.annotated_source_out {
+        if output_dir.exists() && !output_dir.is_dir() {
+            bail!(
+                "Annotated source output path '{}' exists but is not a directory",
+                output_dir.display()
+            );
+        }
     }
     Ok(())
 }
@@ -181,5 +197,34 @@ mod tests {
     #[test]
     fn rejects_invalid_path_remap() {
         assert!(parse_path_remaps(&["missing_separator".to_string()]).is_err());
+    }
+
+    #[test]
+    fn rejects_annotated_source_output_that_is_a_file() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let file = root.join("target/source_profile_tests/annotated_source_file");
+        if let Some(parent) = file.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&file, "not a directory").unwrap();
+        let args = SourceArgs {
+            bundle: root.join("fixtures/source_profile/minimal"),
+            elfs: Vec::new(),
+            source_roots: Vec::new(),
+            path_remaps: Vec::new(),
+            out_dir: root.join("target/source_profile_tests/cli_out"),
+            html: false,
+            xlsx: false,
+            json: false,
+            csv: false,
+            no_browser: true,
+            nonzero_threshold: 0.0,
+            annotated_source_out: Some(file),
+        };
+
+        assert!(validate_source_args(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("Annotated source output path"));
     }
 }

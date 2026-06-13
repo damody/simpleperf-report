@@ -1,3 +1,4 @@
+pub mod annotated_source;
 pub mod bundle;
 pub mod cli;
 pub mod html_report;

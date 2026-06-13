@@ -47,10 +47,10 @@ pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) 
         .iter()
         .filter(|row| row.status.contains("NonZero"))
     {
-        by_file
-            .entry(PathBuf::from(&row.file))
-            .or_default()
-            .insert(row.line, format_annotation(row));
+        by_file.entry(PathBuf::from(&row.file)).or_default().insert(
+            row.line,
+            format_annotation(row, bundle.manifest.lanes.spe.available),
+        );
     }
 
     let mut manifest_files = Vec::new();
@@ -107,7 +107,6 @@ fn write_annotated_file(
     let mut out = String::new();
     for line in lines {
         if let Some(annotation) = annotations.get(&line.line_number) {
-            out.push_str(&leading_whitespace(&line.code));
             out.push_str(annotation);
             out.push('\n');
         }
@@ -123,7 +122,7 @@ fn write_annotated_file(
     }))
 }
 
-fn format_annotation(row: &ReportLineRow) -> String {
+fn format_annotation(row: &ReportLineRow, spe_available: bool) -> String {
     let mut parts = vec![
         format!("p={:.6}%", row.p_pct),
         format!("acc_p={:.6}%", row.acc_p_pct),
@@ -141,12 +140,14 @@ fn format_annotation(row: &ReportLineRow) -> String {
             metric_value_text(row.pmu_values.get(*key))
         ));
     }
-    for key in SPE_COLUMNS {
-        parts.push(format!(
-            "{}={}",
-            key,
-            metric_value_text(row.spe_values.get(*key))
-        ));
+    if spe_available {
+        for key in SPE_COLUMNS {
+            parts.push(format!(
+                "{}={}",
+                key,
+                metric_value_text(row.spe_values.get(*key))
+            ));
+        }
     }
     parts.push(format!("status={}", row.status));
     format!("// [MProfiler] {}", parts.join(", "))
@@ -158,10 +159,6 @@ fn empty_as_missing(value: &str) -> &str {
     } else {
         value
     }
-}
-
-fn leading_whitespace(value: &str) -> String {
-    value.chars().take_while(|ch| ch.is_whitespace()).collect()
 }
 
 fn absolute_source_roots(bundle: &SourceProfileBundle) -> Vec<PathBuf> {
@@ -249,6 +246,8 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use crate::source_profile::metrics::MetricValue;
+
     use super::*;
 
     #[test]
@@ -305,5 +304,62 @@ mod tests {
 
         assert!(result.is_none());
         assert!(!out.join("external/E_/missing/source.cpp").exists());
+    }
+
+    #[test]
+    fn writes_mprofiler_comments_without_source_indentation() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source_dir = root.join("target/source_profile_tests/left_aligned_source");
+        let out = root.join("target/source_profile_tests/left_aligned_out");
+        let _ = fs::remove_dir_all(&source_dir);
+        let _ = fs::remove_dir_all(&out);
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("indented.cpp");
+        fs::write(&source, "void Tick() {\n    DoWork();\n}\n").unwrap();
+        let mut annotations = BTreeMap::new();
+        annotations.insert(2, "// [MProfiler] cpu_cycles=1000".to_string());
+
+        let annotated = write_annotated_file(&source, &annotations, &[source_dir.clone()], &out)
+            .unwrap()
+            .unwrap();
+
+        let text = fs::read_to_string(PathBuf::from(annotated.annotated_path)).unwrap();
+        assert!(text.contains("\n// [MProfiler] cpu_cycles=1000\n    DoWork();"));
+        assert!(!text.contains("\n    // [MProfiler]"));
+    }
+
+    #[test]
+    fn omits_spe_metrics_when_spe_lane_is_unavailable() {
+        let row = ReportLineRow {
+            file: "fixture.cpp".to_string(),
+            line: 1,
+            function: "tick".to_string(),
+            module: "libfixture.so".to_string(),
+            code: "Tick();".to_string(),
+            status: "NonZero|Missing".to_string(),
+            cpu: "0".to_string(),
+            thread: "42".to_string(),
+            self_weight: 1000.0,
+            accumulated_weight: 1000.0,
+            p_pct: 1.0,
+            acc_p_pct: 1.0,
+            file_p_pct: 1.0,
+            file_acc_p_pct: 1.0,
+            pmu_values: BTreeMap::from([
+                ("cpu_cycles".to_string(), MetricValue::Number(1000.0)),
+                ("cpi".to_string(), MetricValue::Number(1.0)),
+            ]),
+            spe_values: BTreeMap::from([(
+                "spe_sample_count".to_string(),
+                MetricValue::Missing("SPE unavailable".to_string()),
+            )]),
+            detail: String::new(),
+        };
+
+        let annotation = format_annotation(&row, false);
+
+        assert!(annotation.contains("cpu_cycles=1000"));
+        assert!(!annotation.contains("spe_sample_count"));
+        assert!(!annotation.contains("spe_"));
     }
 }

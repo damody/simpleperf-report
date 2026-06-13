@@ -71,6 +71,7 @@ pub struct ReportLineRow {
     pub status: String,
     pub cpu: String,
     pub thread: String,
+    pub sample_count: u64,
     pub self_weight: f64,
     pub accumulated_weight: f64,
     pub p_pct: f64,
@@ -118,6 +119,7 @@ struct MutableLineRow {
     tids: BTreeSet<u32>,
     pmu_self: BTreeMap<String, u64>,
     pmu_acc: BTreeMap<String, u64>,
+    pmu_sample_count: u64,
     spe: Option<SpeAddressAggregate>,
     unresolved: Vec<String>,
 }
@@ -156,6 +158,7 @@ impl MutableLineRow {
             tids: BTreeSet::new(),
             pmu_self: BTreeMap::new(),
             pmu_acc: BTreeMap::new(),
+            pmu_sample_count: 0,
             spe: None,
             unresolved: Vec::new(),
         }
@@ -417,6 +420,7 @@ fn resolve_key(
 fn merge_pmu(row: &mut MutableLineRow, aggregate: PmuAddressAggregate) {
     row.cpus.extend(aggregate.cpus);
     row.tids.extend(aggregate.tids);
+    row.pmu_sample_count = row.pmu_sample_count.saturating_add(aggregate.sample_count);
     for (event, value) in aggregate.self_weight_by_event {
         *row.pmu_self.entry(event).or_default() += value;
     }
@@ -577,6 +581,7 @@ fn finalize_rows(
                 status,
                 cpu: join_numbers(&row.cpus),
                 thread: join_numbers(&row.tids),
+                sample_count: row.pmu_sample_count,
                 self_weight,
                 accumulated_weight,
                 p_pct: 0.0,
@@ -1110,6 +1115,7 @@ mod tests {
             status: "Missing".to_string(),
             cpu: String::new(),
             thread: String::new(),
+            sample_count: 0,
             self_weight: 0.0,
             accumulated_weight: 0.0,
             p_pct: 0.0,

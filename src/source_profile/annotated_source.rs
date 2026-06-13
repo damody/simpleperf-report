@@ -301,6 +301,7 @@ fn is_c_like_source(path: &Path) -> bool {
 
 fn format_annotation(row: &ReportLineRow, spe_available: bool) -> String {
     let mut parts = vec![
+        format!("sample_count={}", row.sample_count),
         format!("p={:.6}%", row.p_pct),
         format!("acc_p={:.6}%", row.acc_p_pct),
         format!("file_p={:.6}%", row.file_p_pct),
@@ -620,6 +621,7 @@ Add-Content -LiteralPath $path -Value "// formatter saw short path"
             status: "NonZero|Missing".to_string(),
             cpu: "0".to_string(),
             thread: "42".to_string(),
+            sample_count: 1,
             self_weight: 1000.0,
             accumulated_weight: 1000.0,
             p_pct: 1.0,
@@ -639,6 +641,7 @@ Add-Content -LiteralPath $path -Value "// formatter saw short path"
 
         let annotation = format_annotation(&row, false);
 
+        assert!(annotation.starts_with("// [MProfiler] sample_count=1, p=1.000000%"));
         assert!(annotation.contains("cpu_cycles=1000"));
         assert!(!annotation.contains("spe_sample_count"));
         assert!(!annotation.contains("spe_"));

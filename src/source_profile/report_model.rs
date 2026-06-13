@@ -10,10 +10,10 @@ use super::line_resolver::{
     resolve_source_path, runtime_address_to_relative, CachedElfLineResolver,
 };
 use super::metrics::{
-    aggregate_pmu_by_address, aggregate_spe_by_address, compute_percentages, derive_pmu_metrics,
+    aggregate_pmu_file, aggregate_spe_by_address, compute_percentages, derive_pmu_metrics,
     MetricValue, PmuAddressAggregate, SpeAddressAggregate,
 };
-use super::sample_stream::{read_pmu_samples, read_spe_samples};
+use super::sample_stream::read_spe_samples;
 use super::source_loader::load_source_file;
 use super::symbol_resolver::{discover_debug_elfs, match_debug_elfs, ElfMatchQuality};
 
@@ -184,18 +184,26 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     let mut warnings = collect_quality_warnings(bundle);
     let mut line_resolver = CachedElfLineResolver::default();
     for matched in elf_matches.values() {
-        if matched.quality == ElfMatchQuality::Missing {
+        if matched.quality == ElfMatchQuality::Missing && should_warn_missing_debug_elf(matched) {
             warnings.push(format!("Debug ELF Missing for {}", matched.module_id));
         }
     }
 
     if let Some(path) = &bundle.pmu_samples_path {
-        let (_, samples) = read_pmu_samples(path)?;
-        let aggregates = aggregate_pmu_by_address(&samples, &bundle.event_catalog);
+        let aggregate_result = aggregate_pmu_file(path, &bundle.event_catalog)?;
+        append_cpu_coverage_diagnostic(
+            bundle,
+            aggregate_result.sample_count,
+            &aggregate_result.observed_cpus,
+            &mut warnings,
+        );
+        append_pmu_event_coverage_diagnostic(
+            aggregate_result.sample_count,
+            &aggregate_result.observed_event_keys,
+            &mut warnings,
+        );
+        let aggregates = aggregate_result.rows;
         for (key, aggregate) in aggregates {
-            let sample_meta = samples
-                .iter()
-                .find(|sample| sample.mapping_id == key.mapping_id && sample.ip == key.ip);
             if let Some((file, line, function, module)) = resolve_key(
                 bundle,
                 &elf_matches,
@@ -212,10 +220,6 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                     .or_insert_with(|| MutableLineRow::new(file.clone(), line, code));
                 if row.code.is_empty() {
                     row.code = source_code_cache.line_code(&file, line);
-                }
-                if let Some(sample) = sample_meta {
-                    row.cpus.insert(sample.cpu);
-                    row.tids.insert(sample.tid);
                 }
                 row.function = prefer_nonempty(&row.function, function);
                 row.module = prefer_nonempty(&row.module, module);
@@ -271,6 +275,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
 
     let mut line_rows = finalize_rows(bundle, rows);
     compute_row_percentages(&mut line_rows);
+    append_attribution_diagnostics(bundle, &line_rows, &mut warnings);
     let files = summarize_files(&line_rows);
     let functions = summarize_functions(&line_rows);
     Ok(ReportModel {
@@ -297,6 +302,65 @@ fn load_elf_matches(
         .into_iter()
         .map(|matched| (matched.module_id.clone(), matched))
         .collect())
+}
+
+fn should_warn_missing_debug_elf(matched: &super::symbol_resolver::ElfMatch) -> bool {
+    let module = matched.module_id.as_str();
+    let runtime_path = matched.runtime_path.replace('\\', "/");
+    if is_android_os_module(module, &runtime_path) {
+        return false;
+    }
+    is_app_native_module(module, &runtime_path)
+}
+
+fn is_android_os_module(module: &str, runtime_path: &str) -> bool {
+    let module_lower = module.to_ascii_lowercase();
+    let path_lower = runtime_path.to_ascii_lowercase();
+    if module_lower.starts_with("memfd:")
+        || module_lower.starts_with("mali")
+        || module_lower == "binder"
+        || module_lower.contains("@resource-cache@")
+        || module_lower.contains("(deleted)")
+        || path_lower.starts_with("/dev/")
+        || path_lower.starts_with("/memfd:")
+        || path_lower.starts_with("/mali")
+    {
+        return true;
+    }
+    if module_lower.starts_with("android.")
+        || module_lower.starts_with("androidx.")
+        || module_lower.starts_with("com.android.")
+    {
+        return true;
+    }
+    if module_lower.ends_with(".jar")
+        || module_lower.ends_with(".odex")
+        || module_lower.ends_with(".vdex")
+        || module_lower.ends_with(".apk")
+        || module_lower.ends_with(".map")
+        || module_lower.ends_with(".val")
+        || module_lower.ends_with(".txt")
+    {
+        return true;
+    }
+    path_lower.starts_with("/system/")
+        || path_lower.starts_with("/system_ext/")
+        || path_lower.starts_with("/vendor/")
+        || path_lower.starts_with("/product/")
+        || path_lower.starts_with("/apex/")
+        || path_lower.starts_with("/odm/")
+        || path_lower.starts_with("/oem/")
+}
+
+fn is_app_native_module(module: &str, runtime_path: &str) -> bool {
+    let module_lower = module.to_ascii_lowercase();
+    let path_lower = runtime_path.to_ascii_lowercase();
+    let is_native = module_lower.ends_with(".so") || module_lower.contains(".so.");
+    is_native
+        && (path_lower.starts_with("/data/app/")
+            || path_lower.starts_with("/data/data/")
+            || path_lower.starts_with("/data/user/")
+            || path_lower.starts_with("/data/local/tmp/"))
 }
 
 fn resolve_key(
@@ -351,12 +415,117 @@ fn resolve_key(
 }
 
 fn merge_pmu(row: &mut MutableLineRow, aggregate: PmuAddressAggregate) {
+    row.cpus.extend(aggregate.cpus);
+    row.tids.extend(aggregate.tids);
     for (event, value) in aggregate.self_weight_by_event {
         *row.pmu_self.entry(event).or_default() += value;
     }
     for (event, value) in aggregate.accumulated_weight_by_event {
         *row.pmu_acc.entry(event).or_default() += value;
     }
+}
+
+fn append_cpu_coverage_diagnostic(
+    bundle: &SourceProfileBundle,
+    sample_count: u64,
+    observed: &BTreeSet<u32>,
+    warnings: &mut Vec<String>,
+) {
+    let selected = bundle
+        .manifest
+        .cpu
+        .selected_cpus
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    if selected.len() <= 1 || sample_count == 0 {
+        return;
+    }
+    if observed.len() < selected.len() {
+        warnings.push(format!(
+            "PMU sample CPU coverage is incomplete: selected CPUs [{}], observed sample CPUs [{}]. If observed CPUs are unexpectedly limited, check realtime_profile PERF_SAMPLE_CPU parsing/capture.",
+            join_u32_set(&selected),
+            join_u32_set(&observed),
+        ));
+    }
+}
+
+fn append_pmu_event_coverage_diagnostic(
+    sample_count: u64,
+    observed: &BTreeSet<String>,
+    warnings: &mut Vec<String>,
+) {
+    if sample_count == 0 {
+        return;
+    }
+    if observed.len() <= 1 {
+        warnings.push(format!(
+            "PMU samples only contain event(s) [{}]. Metrics requiring instructions/cache/branch events, such as CPI, MIPS, cache hit rate, and branch miss rate, will be Missing unless those PMU events are captured.",
+            observed.iter().cloned().collect::<Vec<_>>().join(",")
+        ));
+    }
+}
+
+fn join_u32_set(values: &BTreeSet<u32>) -> String {
+    values
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn append_attribution_diagnostics(
+    bundle: &SourceProfileBundle,
+    rows: &[ReportLineRow],
+    warnings: &mut Vec<String>,
+) {
+    if rows.is_empty() {
+        warnings.push(
+            "No source rows were generated. Check source_root_hints/path_remaps and source file availability."
+                .to_string(),
+        );
+        return;
+    }
+
+    let has_sample_stream = bundle.pmu_samples_path.is_some() || bundle.spe_samples_path.is_some();
+    let sampled_rows = rows
+        .iter()
+        .filter(|row| row.self_weight > 0.0 || row.accumulated_weight > 0.0)
+        .count();
+    let function_rows = rows
+        .iter()
+        .filter(|row| has_known_function(&row.function))
+        .count();
+    let sampled_function_rows = rows
+        .iter()
+        .filter(|row| {
+            (row.self_weight > 0.0 || row.accumulated_weight > 0.0)
+                && has_known_function(&row.function)
+        })
+        .count();
+
+    if has_sample_stream && sampled_rows == 0 {
+        warnings.push(
+            "No sampled source rows were attributed. PMU/SPE samples exist, but no sample address resolved to source; check --elf debug ELF paths/build-id matching first, then source roots/path remaps."
+                .to_string(),
+        );
+    }
+    if function_rows == 0 {
+        warnings.push(
+            "No source rows contain function names. This usually means no matching unstripped debug ELF/DWARF was available; pass debug ELF files or directories with --elf and verify build IDs."
+                .to_string(),
+        );
+    } else if sampled_rows > 0 && sampled_function_rows == 0 {
+        warnings.push(
+            "Sampled source rows were attributed, but none include function names. Check whether matched ELF files contain function/debug information."
+                .to_string(),
+        );
+    }
+}
+
+fn has_known_function(function: &str) -> bool {
+    let trimmed = function.trim();
+    !trimmed.is_empty() && trimmed != "<unknown>"
 }
 
 fn finalize_rows(
@@ -925,5 +1094,103 @@ mod tests {
             row.pmu_values.get("mcps"),
             Some(MetricValue::Number(0.0))
         ));
+    }
+
+    #[test]
+    fn attribution_diagnostics_explain_empty_function_output() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let rows = vec![ReportLineRow {
+            file: "a.cpp".to_string(),
+            line: 1,
+            function: String::new(),
+            module: String::new(),
+            code: "int main() {}".to_string(),
+            status: "Missing".to_string(),
+            cpu: String::new(),
+            thread: String::new(),
+            self_weight: 0.0,
+            accumulated_weight: 0.0,
+            p_pct: 0.0,
+            acc_p_pct: 0.0,
+            file_p_pct: 0.0,
+            file_acc_p_pct: 0.0,
+            pmu_values: BTreeMap::new(),
+            spe_values: BTreeMap::new(),
+            detail: String::new(),
+        }];
+        let mut warnings = Vec::new();
+
+        append_attribution_diagnostics(&bundle, &rows, &mut warnings);
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("No sampled source rows were attributed")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("No source rows contain function names")));
+    }
+
+    #[test]
+    fn cpu_coverage_diagnostic_warns_when_samples_only_cover_one_selected_cpu() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        bundle.manifest.cpu.selected_cpus = vec![0, 1, 2, 3];
+        let mut warnings = Vec::new();
+
+        append_cpu_coverage_diagnostic(&bundle, 1, &BTreeSet::from([0]), &mut warnings);
+
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("selected CPUs [0,1,2,3]")));
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("observed sample CPUs [0]")));
+    }
+
+    #[test]
+    fn pmu_event_coverage_diagnostic_explains_missing_derived_metrics() {
+        let mut warnings = Vec::new();
+
+        append_pmu_event_coverage_diagnostic(
+            1,
+            &BTreeSet::from(["cpu_cycles".to_string()]),
+            &mut warnings,
+        );
+
+        assert!(warnings.iter().any(|warning| {
+            warning.contains("PMU samples only contain event(s)") && warning.contains("CPI")
+        }));
+    }
+
+    #[test]
+    fn missing_debug_elf_warning_ignores_android_os_modules() {
+        let os_match = crate::source_profile::symbol_resolver::ElfMatch {
+            module_id: "android.hardware.graphics.mapper@4.0.so".to_string(),
+            runtime_path: "/system/lib64/android.hardware.graphics.mapper@4.0.so".to_string(),
+            candidate_path: None,
+            quality: ElfMatchQuality::Missing,
+            reason: "missing".to_string(),
+        };
+        let app_match = crate::source_profile::symbol_resolver::ElfMatch {
+            module_id: "libUE4.so".to_string(),
+            runtime_path: "/data/app/pkg/lib/arm64/libUE4.so".to_string(),
+            candidate_path: None,
+            quality: ElfMatchQuality::Missing,
+            reason: "missing".to_string(),
+        };
+        let pseudo_match = crate::source_profile::symbol_resolver::ElfMatch {
+            module_id: "memfd:jit-cache (deleted)".to_string(),
+            runtime_path: "/memfd:jit-cache (deleted)".to_string(),
+            candidate_path: None,
+            quality: ElfMatchQuality::Missing,
+            reason: "missing".to_string(),
+        };
+
+        assert!(!should_warn_missing_debug_elf(&os_match));
+        assert!(!should_warn_missing_debug_elf(&pseudo_match));
+        assert!(should_warn_missing_debug_elf(&app_match));
     }
 }

@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-use super::sample_stream::{PmuSample, SpeSample};
+use anyhow::Result;
+
+use super::sample_stream::{for_each_pmu_sample, PmuSample, SampleStreamHeader, SpeSample};
 use super::schema::SourceProfileEventCatalog;
 
 #[derive(Debug, Clone)]
@@ -418,8 +420,19 @@ pub struct PmuAddressKey {
 #[derive(Debug, Default, Clone)]
 pub struct PmuAddressAggregate {
     pub sample_count: u64,
+    pub cpus: BTreeSet<u32>,
+    pub tids: BTreeSet<u32>,
     pub self_weight_by_event: BTreeMap<String, u64>,
     pub accumulated_weight_by_event: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PmuAggregateResult {
+    pub header: SampleStreamHeader,
+    pub rows: BTreeMap<PmuAddressKey, PmuAddressAggregate>,
+    pub observed_cpus: BTreeSet<u32>,
+    pub observed_event_keys: BTreeSet<String>,
+    pub sample_count: u64,
 }
 
 pub fn aggregate_pmu_by_address(
@@ -428,35 +441,73 @@ pub fn aggregate_pmu_by_address(
 ) -> BTreeMap<PmuAddressKey, PmuAddressAggregate> {
     let mut rows = BTreeMap::new();
     for sample in samples {
-        let event_key = event_catalog
-            .events
-            .get(sample.event_key_ref as usize)
-            .map(|event| event.event_key.as_str())
-            .unwrap_or("unknown_event")
-            .to_string();
-        let key = PmuAddressKey {
-            mapping_id: sample.mapping_id,
-            ip: sample.ip,
-        };
-        let row: &mut PmuAddressAggregate = rows.entry(key).or_default();
-        row.sample_count += 1;
-        *row.self_weight_by_event
-            .entry(event_key.clone())
-            .or_default() += sample.period_or_weight;
-
-        for callchain_ip in &sample.callchain_ips {
-            let callchain_key = PmuAddressKey {
-                mapping_id: sample.mapping_id,
-                ip: *callchain_ip,
-            };
-            let callchain_row: &mut PmuAddressAggregate = rows.entry(callchain_key).or_default();
-            *callchain_row
-                .accumulated_weight_by_event
-                .entry(event_key.clone())
-                .or_default() += sample.period_or_weight;
-        }
+        aggregate_one_pmu_sample(&mut rows, sample, event_catalog);
     }
     rows
+}
+
+pub fn aggregate_pmu_file(
+    path: &Path,
+    event_catalog: &SourceProfileEventCatalog,
+) -> Result<PmuAggregateResult> {
+    let mut rows = BTreeMap::new();
+    let mut observed_cpus = BTreeSet::new();
+    let mut observed_event_keys = BTreeSet::new();
+    let mut sample_count = 0_u64;
+    let header = for_each_pmu_sample(path, |sample| {
+        sample_count += 1;
+        observed_cpus.insert(sample.cpu);
+        if let Some(event) = event_catalog.events.get(sample.event_key_ref as usize) {
+            observed_event_keys.insert(event.event_key.clone());
+        }
+        aggregate_one_pmu_sample(&mut rows, &sample, event_catalog);
+        Ok(())
+    })?;
+    Ok(PmuAggregateResult {
+        header,
+        rows,
+        observed_cpus,
+        observed_event_keys,
+        sample_count,
+    })
+}
+
+fn aggregate_one_pmu_sample(
+    rows: &mut BTreeMap<PmuAddressKey, PmuAddressAggregate>,
+    sample: &PmuSample,
+    event_catalog: &SourceProfileEventCatalog,
+) {
+    let event_key = event_catalog
+        .events
+        .get(sample.event_key_ref as usize)
+        .map(|event| event.event_key.as_str())
+        .unwrap_or("unknown_event")
+        .to_string();
+    let key = PmuAddressKey {
+        mapping_id: sample.mapping_id,
+        ip: sample.ip,
+    };
+    let row: &mut PmuAddressAggregate = rows.entry(key).or_default();
+    row.sample_count += 1;
+    row.cpus.insert(sample.cpu);
+    row.tids.insert(sample.tid);
+    *row.self_weight_by_event
+        .entry(event_key.clone())
+        .or_default() += sample.period_or_weight;
+
+    for callchain_ip in &sample.callchain_ips {
+        let callchain_key = PmuAddressKey {
+            mapping_id: sample.mapping_id,
+            ip: *callchain_ip,
+        };
+        let callchain_row: &mut PmuAddressAggregate = rows.entry(callchain_key).or_default();
+        callchain_row.cpus.insert(sample.cpu);
+        callchain_row.tids.insert(sample.tid);
+        *callchain_row
+            .accumulated_weight_by_event
+            .entry(event_key.clone())
+            .or_default() += sample.period_or_weight;
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -552,6 +603,74 @@ mod tests {
         assert!(rows
             .values()
             .any(|row| row.accumulated_weight_by_event.contains_key("cpu_cycles")));
+    }
+
+    #[test]
+    fn aggregate_pmu_by_address_tracks_cpu_and_tid() {
+        let event_catalog = SourceProfileEventCatalog {
+            session_id: "test".to_string(),
+            events: vec![crate::source_profile::schema::EventDefinition {
+                event_key: "cpu_cycles".to_string(),
+                display_name: "CPU Cycles".to_string(),
+                source: "pmu".to_string(),
+                event_type: "hardware".to_string(),
+                config: "0".to_string(),
+                arm_arch_event_code: None,
+                sample_period: 1000,
+                unit: "cycles".to_string(),
+                semantic_tags: Vec::new(),
+                per_cpu_support: Vec::new(),
+            }],
+        };
+        let rows = aggregate_pmu_by_address(
+            &[
+                PmuSample {
+                    flags: 0,
+                    event_run_ref: 0,
+                    event_key_ref: 0,
+                    sample_kind: 1,
+                    pid: 10,
+                    tid: 101,
+                    cpu: 0,
+                    mapping_id: 1,
+                    timestamp_ns: 1,
+                    ip: 0x1000,
+                    period_or_weight: 1000,
+                    callchain_ips: vec![0x900],
+                },
+                PmuSample {
+                    flags: 0,
+                    event_run_ref: 0,
+                    event_key_ref: 0,
+                    sample_kind: 1,
+                    pid: 10,
+                    tid: 102,
+                    cpu: 7,
+                    mapping_id: 1,
+                    timestamp_ns: 2,
+                    ip: 0x1000,
+                    period_or_weight: 1000,
+                    callchain_ips: vec![0x900],
+                },
+            ],
+            &event_catalog,
+        );
+        let row = rows
+            .get(&PmuAddressKey {
+                mapping_id: 1,
+                ip: 0x1000,
+            })
+            .unwrap();
+        assert_eq!(row.cpus, BTreeSet::from([0, 7]));
+        assert_eq!(row.tids, BTreeSet::from([101, 102]));
+        let callchain = rows
+            .get(&PmuAddressKey {
+                mapping_id: 1,
+                ip: 0x900,
+            })
+            .unwrap();
+        assert_eq!(callchain.cpus, BTreeSet::from([0, 7]));
+        assert_eq!(callchain.tids, BTreeSet::from([101, 102]));
     }
 
     #[test]

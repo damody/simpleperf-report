@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::io::{Cursor, Read};
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -72,6 +73,39 @@ pub fn read_pmu_samples(path: &Path) -> Result<(SampleStreamHeader, Vec<PmuSampl
     Ok((header, samples))
 }
 
+pub fn for_each_pmu_sample(
+    path: &Path,
+    mut visit: impl FnMut(PmuSample) -> Result<()>,
+) -> Result<SampleStreamHeader> {
+    let file = File::open(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let header = read_header_from_reader(&mut reader)?;
+    if header.stream_kind != 1 {
+        bail!(
+            "Sample stream '{}' has kind {}, expected PMU kind 1",
+            path.display(),
+            header.stream_kind
+        );
+    }
+
+    for _ in 0..header.record_count {
+        let record_type = read_u16(&mut reader)?;
+        let record_size = read_u16(&mut reader)?;
+        if record_size < 4 {
+            bail!("Invalid PMU record size {}", record_size);
+        }
+        let mut bytes = Vec::with_capacity(record_size as usize);
+        bytes.extend_from_slice(&record_type.to_le_bytes());
+        bytes.extend_from_slice(&record_size.to_le_bytes());
+        let rest_size = usize::from(record_size - 4);
+        bytes.resize(record_size as usize, 0);
+        reader.read_exact(&mut bytes[4..4 + rest_size])?;
+        let mut cursor = Cursor::new(bytes);
+        visit(read_pmu_record(&mut cursor)?)?;
+    }
+    Ok(header)
+}
+
 pub fn read_spe_samples(path: &Path) -> Result<(SampleStreamHeader, Vec<SpeSample>)> {
     let bytes = fs::read(path).with_context(|| format!("Failed to read '{}'", path.display()))?;
     read_spe_samples_from_bytes(bytes)
@@ -124,6 +158,50 @@ fn read_header(cursor: &mut Cursor<Vec<u8>>) -> Result<SampleStreamHeader> {
         bail!("Invalid sample stream header size {}", header_size);
     }
     cursor.set_position(header_size as u64);
+
+    Ok(SampleStreamHeader {
+        stream_kind,
+        version_major,
+        version_minor,
+        record_count,
+        first_timestamp_ns,
+        last_timestamp_ns,
+    })
+}
+
+fn read_header_from_reader(reader: &mut impl Read) -> Result<SampleStreamHeader> {
+    let mut magic = [0_u8; 4];
+    reader.read_exact(&mut magic)?;
+    if magic != [b'M', b'P', b'S', b'P'] {
+        bail!("Invalid sample stream magic");
+    }
+    let stream_kind = read_u16(reader)?;
+    let version_major = read_u16(reader)?;
+    let version_minor = read_u16(reader)?;
+    let header_size = read_u16(reader)?;
+    let endian = read_u8(reader)?;
+    let timestamp_unit = read_u8(reader)?;
+    let _reserved = read_u16(reader)?;
+    let record_count = read_u64(reader)?;
+    let first_timestamp_ns = read_u64(reader)?;
+    let last_timestamp_ns = read_u64(reader)?;
+
+    if endian != 1 {
+        bail!("Unsupported sample stream endian {}", endian);
+    }
+    if timestamp_unit != 1 {
+        bail!(
+            "Unsupported sample stream timestamp unit {}",
+            timestamp_unit
+        );
+    }
+    if header_size < 40 {
+        bail!("Invalid sample stream header size {}", header_size);
+    }
+    if header_size > 40 {
+        let mut skipped = vec![0_u8; usize::from(header_size - 40)];
+        reader.read_exact(&mut skipped)?;
+    }
 
     Ok(SampleStreamHeader {
         stream_kind,
@@ -225,27 +303,27 @@ fn read_spe_record(cursor: &mut Cursor<Vec<u8>>) -> Result<SpeSample> {
     })
 }
 
-fn read_u8(cursor: &mut Cursor<Vec<u8>>) -> Result<u8> {
+fn read_u8(reader: &mut impl Read) -> Result<u8> {
     let mut bytes = [0_u8; 1];
-    cursor.read_exact(&mut bytes)?;
+    reader.read_exact(&mut bytes)?;
     Ok(bytes[0])
 }
 
-fn read_u16(cursor: &mut Cursor<Vec<u8>>) -> Result<u16> {
+fn read_u16(reader: &mut impl Read) -> Result<u16> {
     let mut bytes = [0_u8; 2];
-    cursor.read_exact(&mut bytes)?;
+    reader.read_exact(&mut bytes)?;
     Ok(u16::from_le_bytes(bytes))
 }
 
-fn read_u32(cursor: &mut Cursor<Vec<u8>>) -> Result<u32> {
+fn read_u32(reader: &mut impl Read) -> Result<u32> {
     let mut bytes = [0_u8; 4];
-    cursor.read_exact(&mut bytes)?;
+    reader.read_exact(&mut bytes)?;
     Ok(u32::from_le_bytes(bytes))
 }
 
-fn read_u64(cursor: &mut Cursor<Vec<u8>>) -> Result<u64> {
+fn read_u64(reader: &mut impl Read) -> Result<u64> {
     let mut bytes = [0_u8; 8];
-    cursor.read_exact(&mut bytes)?;
+    reader.read_exact(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
 }
 
@@ -264,6 +342,24 @@ mod tests {
         assert_eq!(samples[0].event_key_ref, 0);
         assert_eq!(samples[0].period_or_weight, 1000);
         assert_eq!(samples[0].callchain_ips.len(), 1);
+    }
+
+    #[test]
+    fn streams_minimal_pmu_samples_without_loading_vec() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/source_profile/minimal/pmu_samples.bin");
+        let mut count = 0;
+        let header = for_each_pmu_sample(&path, |sample| {
+            if count == 0 {
+                assert_eq!(sample.event_key_ref, 0);
+                assert_eq!(sample.period_or_weight, 1000);
+            }
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(header.record_count, 5);
+        assert_eq!(count, 5);
     }
 
     #[test]

@@ -53,6 +53,37 @@ pub const SPE_COLUMNS: &[&str] = &[
     "spe_decode_errors",
 ];
 
+pub fn pmu_raw_column_keys(bundle: &SourceProfileBundle) -> Vec<String> {
+    let requested = &bundle.manifest.capture_options.requested_event_keys;
+    let selected = if requested.is_empty() {
+        RAW_PMU_COLUMNS
+            .iter()
+            .map(|key| (*key).to_string())
+            .collect::<BTreeSet<_>>()
+    } else {
+        requested.iter().cloned().collect::<BTreeSet<_>>()
+    };
+
+    let mut keys = Vec::new();
+    for event in &bundle.event_catalog.events {
+        if selected.contains(&event.event_key) {
+            keys.push(event.event_key.clone());
+        }
+    }
+    for key in selected {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+pub fn pmu_column_keys(bundle: &SourceProfileBundle) -> Vec<String> {
+    let mut keys = pmu_raw_column_keys(bundle);
+    keys.extend(DERIVED_PMU_COLUMNS.iter().map(|key| (*key).to_string()));
+    keys
+}
+
 #[derive(Debug, Clone)]
 pub struct ReportModel {
     pub rows: Vec<ReportLineRow>,
@@ -546,27 +577,28 @@ fn finalize_rows(
     bundle: &SourceProfileBundle,
     rows: BTreeMap<(PathBuf, u32), MutableLineRow>,
 ) -> Vec<ReportLineRow> {
-    let event_support = event_support_map(bundle);
+    let raw_pmu_keys = pmu_raw_column_keys(bundle);
+    let event_support = event_support_map(bundle, &raw_pmu_keys);
     let effective_seconds = effective_time_seconds(bundle);
     rows.into_values()
         .map(|row| {
             let mut pmu_values = BTreeMap::new();
             let dense_pmu_self_samples =
-                dense_supported_pmu_counts(&row.pmu_self_samples, &event_support);
-            for key in RAW_PMU_COLUMNS {
-                if !event_support.get(*key).copied().unwrap_or(false) {
+                dense_supported_pmu_counts(&row.pmu_self_samples, &raw_pmu_keys, &event_support);
+            for key in &raw_pmu_keys {
+                if !event_support.get(key.as_str()).copied().unwrap_or(false) {
                     pmu_values.insert(
-                        (*key).to_string(),
+                        key.clone(),
                         MetricValue::Missing(format!("{key} is not available")),
                     );
                 } else {
-                    let sample_count = dense_pmu_self_samples.get(*key).copied().unwrap_or(0);
+                    let sample_count = dense_pmu_self_samples.get(key).copied().unwrap_or(0);
                     let ratio = if row.pmu_sample_count > 0 {
                         sample_count as f64 / row.pmu_sample_count as f64
                     } else {
                         0.0
                     };
-                    pmu_values.insert((*key).to_string(), MetricValue::Number(ratio));
+                    pmu_values.insert(key.clone(), MetricValue::Number(ratio));
                 }
             }
             for (key, value) in derive_pmu_metrics(&dense_pmu_self_samples, effective_seconds) {
@@ -612,12 +644,13 @@ fn finalize_rows(
 
 fn dense_supported_pmu_counts(
     sparse: &BTreeMap<String, u64>,
+    raw_pmu_keys: &[String],
     event_support: &BTreeMap<&str, bool>,
 ) -> BTreeMap<String, u64> {
     let mut dense = BTreeMap::new();
-    for key in RAW_PMU_COLUMNS {
-        if event_support.get(*key).copied().unwrap_or(false) {
-            dense.insert((*key).to_string(), sparse.get(*key).copied().unwrap_or(0));
+    for key in raw_pmu_keys {
+        if event_support.get(key.as_str()).copied().unwrap_or(false) {
+            dense.insert(key.clone(), sparse.get(key).copied().unwrap_or(0));
         }
     }
     dense
@@ -858,9 +891,12 @@ fn metric_detail(
     parts.join("; ")
 }
 
-fn event_support_map(bundle: &SourceProfileBundle) -> BTreeMap<&str, bool> {
+fn event_support_map<'a>(
+    bundle: &SourceProfileBundle,
+    raw_pmu_keys: &'a [String],
+) -> BTreeMap<&'a str, bool> {
     let mut map = BTreeMap::new();
-    for key in RAW_PMU_COLUMNS {
+    for key in raw_pmu_keys {
         let supported = bundle
             .event_catalog
             .events
@@ -870,7 +906,7 @@ fn event_support_map(bundle: &SourceProfileBundle) -> BTreeMap<&str, bool> {
                 event.per_cpu_support.is_empty()
                     || event.per_cpu_support.iter().any(|cpu| cpu.supported)
             });
-        map.insert(*key, supported);
+        map.insert(key.as_str(), supported);
     }
     map
 }
@@ -1117,6 +1153,37 @@ mod tests {
             rows[0].pmu_values.get("inst_retired"),
             Some(MetricValue::Number(value)) if (*value - 0.5).abs() < f64::EPSILON
         ));
+    }
+
+    #[test]
+    fn pmu_columns_follow_requested_manifest_keys_in_catalog_order() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        bundle.manifest.capture_options.requested_event_keys = vec![
+            "stall_backend_membound".to_string(),
+            "cpu_cycles".to_string(),
+        ];
+        bundle
+            .event_catalog
+            .events
+            .push(crate::source_profile::schema::EventDefinition {
+                event_key: "stall_backend_membound".to_string(),
+                display_name: "Backend stall memory-bound".to_string(),
+                source: "pmu".to_string(),
+                event_type: "PERF_TYPE_RAW".to_string(),
+                config: "0x8164".to_string(),
+                arm_arch_event_code: Some("0x8164".to_string()),
+                sample_period: 1000,
+                unit: "samples".to_string(),
+                semantic_tags: vec!["stall".to_string(), "backend".to_string()],
+                per_cpu_support: Vec::new(),
+            });
+
+        let keys = pmu_raw_column_keys(&bundle);
+        assert!(keys.contains(&"cpu_cycles".to_string()));
+        assert!(keys.contains(&"stall_backend_membound".to_string()));
+        assert!(!keys.contains(&"stall_backend_l2d".to_string()));
     }
 
     #[test]

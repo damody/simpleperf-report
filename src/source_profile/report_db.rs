@@ -51,9 +51,9 @@ pub fn write_report_db(bundle: &SourceProfileBundle, output: &Path) -> Result<()
         let mut stmt = tx.prepare(
             "INSERT INTO source_lines(
                 file, line, function, module, cpu, thread, status, code, detail,
-                self_weight, accumulated_weight, p_pct, acc_p_pct, file_p_pct, file_acc_p_pct,
+                sample_count, self_weight, accumulated_weight, p_pct, acc_p_pct, file_p_pct, file_acc_p_pct,
                 cpi, l1d_cache_hit_rate, mips, mcps, pmu_json, spe_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         )?;
         for row in &model.rows {
             let pmu_json = metric_map_json(&row.pmu_values)?;
@@ -68,6 +68,7 @@ pub fn write_report_db(bundle: &SourceProfileBundle, output: &Path) -> Result<()
                 row.status,
                 row.code,
                 row.detail,
+                row.sample_count,
                 row.self_weight,
                 row.accumulated_weight,
                 row.p_pct,
@@ -149,6 +150,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL,
             code TEXT NOT NULL,
             detail TEXT NOT NULL,
+            sample_count INTEGER NOT NULL,
             self_weight REAL NOT NULL,
             accumulated_weight REAL NOT NULL,
             p_pct REAL NOT NULL,
@@ -193,6 +195,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX source_lines_status_idx ON source_lines(status);
         CREATE INDEX source_lines_cpu_idx ON source_lines(cpu);
         CREATE INDEX source_lines_thread_idx ON source_lines(thread);
+        CREATE INDEX source_lines_sample_count_idx ON source_lines(sample_count);
         CREATE INDEX source_lines_self_weight_idx ON source_lines(self_weight);
         CREATE INDEX source_lines_accumulated_weight_idx ON source_lines(accumulated_weight);
         CREATE INDEX source_lines_line_idx ON source_lines(line);
@@ -247,5 +250,14 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM source_lines", [], |row| row.get(0))
             .unwrap();
         assert!(line_count >= 19, "expected all source lines in sqlite");
+        let sample_count_total: i64 = conn
+            .query_row("SELECT SUM(sample_count) FROM source_lines", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            sample_count_total > 0,
+            "expected line sample counts in sqlite"
+        );
     }
 }

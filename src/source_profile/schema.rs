@@ -89,6 +89,8 @@ pub struct CaptureOptions {
     pub callchain_depth: u32,
     pub pmu_buffer_pages: u32,
     #[serde(default)]
+    pub requested_event_keys: Vec<String>,
+    #[serde(default)]
     pub spe_aux_buffer_bytes: Option<u64>,
     #[serde(default)]
     pub duration_ms_requested: Option<u64>,

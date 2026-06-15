@@ -10,8 +10,7 @@ use serde::Serialize;
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, metric_value_text, ReportLineRow, DERIVED_PMU_COLUMNS, RAW_PMU_COLUMNS,
-    SPE_COLUMNS,
+    build_report_model, metric_value_text, pmu_column_keys, ReportLineRow, SPE_COLUMNS,
 };
 use super::source_loader::load_source_file;
 
@@ -42,6 +41,7 @@ pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) 
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create '{}'", output_dir.display()))?;
     let model = build_report_model(bundle)?;
+    let pmu_columns = pmu_column_keys(bundle);
     let roots = absolute_source_roots(bundle);
     let formatter = discover_mprofiler_astyle();
     let mut by_file = BTreeMap::<PathBuf, BTreeMap<u32, String>>::new();
@@ -53,7 +53,7 @@ pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) 
     {
         by_file.entry(PathBuf::from(&row.file)).or_default().insert(
             row.line,
-            format_annotation(row, bundle.manifest.lanes.spe.available),
+            format_annotation(row, &pmu_columns, bundle.manifest.lanes.spe.available),
         );
     }
 
@@ -299,7 +299,7 @@ fn is_c_like_source(path: &Path) -> bool {
     )
 }
 
-fn format_annotation(row: &ReportLineRow, spe_available: bool) -> String {
+fn format_annotation(row: &ReportLineRow, pmu_columns: &[String], spe_available: bool) -> String {
     let mut parts = vec![
         format!("sample_count={}", row.sample_count),
         format!("p={:.6}%", row.p_pct),
@@ -311,11 +311,11 @@ fn format_annotation(row: &ReportLineRow, spe_available: bool) -> String {
         format!("cpu={}", empty_as_missing(&row.cpu)),
         format!("thread={}", empty_as_missing(&row.thread)),
     ];
-    for key in RAW_PMU_COLUMNS.iter().chain(DERIVED_PMU_COLUMNS.iter()) {
+    for key in pmu_columns {
         parts.push(format!(
             "{}={}",
             key,
-            metric_value_text(row.pmu_values.get(*key))
+            metric_value_text(row.pmu_values.get(key))
         ));
     }
     if spe_available {
@@ -639,7 +639,8 @@ Add-Content -LiteralPath $path -Value "// formatter saw short path"
             detail: String::new(),
         };
 
-        let annotation = format_annotation(&row, false);
+        let annotation =
+            format_annotation(&row, &["cpu_cycles".to_string(), "cpi".to_string()], false);
 
         assert!(annotation.starts_with("// [MProfiler] sample_count=1, p=1.000000%"));
         assert!(annotation.contains("cpu_cycles=1"));

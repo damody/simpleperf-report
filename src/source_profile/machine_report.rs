@@ -7,9 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use super::bundle::SourceProfileBundle;
-use super::report_model::{
-    build_report_model, metric_value_text, DERIVED_PMU_COLUMNS, RAW_PMU_COLUMNS, SPE_COLUMNS,
-};
+use super::report_model::{build_report_model, metric_value_text, pmu_column_keys, SPE_COLUMNS};
 
 pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
     if let Some(parent) = output.parent() {
@@ -30,8 +28,8 @@ pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Re
             "pmu_buffer_pages": bundle.manifest.capture_options.pmu_buffer_pages,
             "spe_aux_buffer_bytes": bundle.manifest.capture_options.spe_aux_buffer_bytes
         },
-        "columns": columns(),
-        "rows": model.rows.iter().map(row_to_values).collect::<Vec<_>>(),
+        "columns": columns(bundle),
+        "rows": model.rows.iter().map(|row| row_to_values(row, bundle)).collect::<Vec<_>>(),
         "warnings": model.warnings
     });
     fs::write(output, serde_json::to_vec_pretty(&report)?)
@@ -44,18 +42,22 @@ pub fn write_csv_exports(bundle: &SourceProfileBundle, output_dir: &Path) -> Res
     let model = build_report_model(bundle)?;
     write_csv(
         &output_dir.join("AllLines.csv"),
-        &columns(),
-        &model.rows.iter().map(row_to_values).collect::<Vec<_>>(),
+        &columns(bundle),
+        &model
+            .rows
+            .iter()
+            .map(|row| row_to_values(row, bundle))
+            .collect::<Vec<_>>(),
     )?;
     let sampled_rows = model
         .rows
         .iter()
         .filter(|row| row.status != "0")
-        .map(row_to_values)
+        .map(|row| row_to_values(row, bundle))
         .collect::<Vec<_>>();
     write_csv(
         &output_dir.join("SampledLines.csv"),
-        &columns(),
+        &columns(bundle),
         &sampled_rows,
     )?;
     write_csv(
@@ -116,30 +118,32 @@ pub fn write_csv_exports(bundle: &SourceProfileBundle, output_dir: &Path) -> Res
     )
 }
 
-fn columns() -> Vec<&'static str> {
+fn columns(bundle: &SourceProfileBundle) -> Vec<String> {
     let mut columns = vec![
-        "file",
-        "line",
-        "function",
-        "module",
-        "cpu",
-        "thread",
-        "code",
-        "status",
-        "p_pct",
-        "acc_p_pct",
-        "file_p_pct",
-        "file_acc_p_pct",
-        "self_weight",
-        "acc_weight",
+        "file".to_string(),
+        "line".to_string(),
+        "function".to_string(),
+        "module".to_string(),
+        "cpu".to_string(),
+        "thread".to_string(),
+        "code".to_string(),
+        "status".to_string(),
+        "p_pct".to_string(),
+        "acc_p_pct".to_string(),
+        "file_p_pct".to_string(),
+        "file_acc_p_pct".to_string(),
+        "self_weight".to_string(),
+        "acc_weight".to_string(),
     ];
-    columns.extend_from_slice(RAW_PMU_COLUMNS);
-    columns.extend_from_slice(DERIVED_PMU_COLUMNS);
-    columns.extend_from_slice(SPE_COLUMNS);
+    columns.extend(pmu_column_keys(bundle));
+    columns.extend(SPE_COLUMNS.iter().map(|key| (*key).to_string()));
     columns
 }
 
-fn row_to_values(row: &super::report_model::ReportLineRow) -> Vec<String> {
+fn row_to_values(
+    row: &super::report_model::ReportLineRow,
+    bundle: &SourceProfileBundle,
+) -> Vec<String> {
     let mut values = vec![
         row.file.clone(),
         row.line.to_string(),
@@ -156,8 +160,8 @@ fn row_to_values(row: &super::report_model::ReportLineRow) -> Vec<String> {
         format!("{:.0}", row.self_weight),
         format!("{:.0}", row.accumulated_weight),
     ];
-    for key in RAW_PMU_COLUMNS.iter().chain(DERIVED_PMU_COLUMNS.iter()) {
-        values.push(metric_value_text(row.pmu_values.get(*key)));
+    for key in pmu_column_keys(bundle) {
+        values.push(metric_value_text(row.pmu_values.get(&key)));
     }
     for key in SPE_COLUMNS {
         values.push(metric_value_text(row.spe_values.get(*key)));
@@ -165,12 +169,12 @@ fn row_to_values(row: &super::report_model::ReportLineRow) -> Vec<String> {
     values
 }
 
-fn write_csv(path: &Path, headers: &[&str], rows: &[Vec<String>]) -> Result<()> {
+fn write_csv<S: AsRef<str>>(path: &Path, headers: &[S], rows: &[Vec<String>]) -> Result<()> {
     let mut out = String::new();
     out.push_str(
         &headers
             .iter()
-            .map(|h| csv_escape(h))
+            .map(|h| csv_escape(h.as_ref()))
             .collect::<Vec<_>>()
             .join(","),
     );

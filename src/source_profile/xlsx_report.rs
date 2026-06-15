@@ -7,8 +7,7 @@ use rust_xlsxwriter::{Color, Format, FormatAlign, Workbook, Worksheet};
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, metric_value_number, metric_value_text, DERIVED_PMU_COLUMNS,
-    RAW_PMU_COLUMNS, SPE_COLUMNS,
+    build_report_model, metric_value_number, metric_value_text, pmu_column_keys, SPE_COLUMNS,
 };
 use super::source_loader::{load_source_file, SourceLine};
 use super::summary::SourceReportSummary;
@@ -173,11 +172,12 @@ pub fn write_summary_workbook(bundle: &SourceProfileBundle, output: &Path) -> Re
 
     let all_lines = workbook.add_worksheet();
     all_lines.set_name("All Lines")?;
-    write_line_sheet(all_lines, &model.rows, false, &styles)?;
+    let pmu_columns = pmu_column_keys(bundle);
+    write_line_sheet(all_lines, &model.rows, &pmu_columns, false, &styles)?;
 
     let sampled_lines = workbook.add_worksheet();
     sampled_lines.set_name("Sampled Lines")?;
-    write_line_sheet(sampled_lines, &model.rows, true, &styles)?;
+    write_line_sheet(sampled_lines, &model.rows, &pmu_columns, true, &styles)?;
 
     let files = workbook.add_worksheet();
     files.set_name("Files")?;
@@ -240,6 +240,7 @@ fn format_basic_sheet(
 fn write_line_sheet(
     worksheet: &mut Worksheet,
     lines: &[super::report_model::ReportLineRow],
+    pmu_columns: &[String],
     sampled_only: bool,
     styles: &WorkbookStyles,
 ) -> Result<()> {
@@ -259,8 +260,7 @@ fn write_line_sheet(
         "Self Weight",
         "Accumulated Weight",
     ];
-    headers.extend_from_slice(RAW_PMU_COLUMNS);
-    headers.extend_from_slice(DERIVED_PMU_COLUMNS);
+    headers.extend(pmu_columns.iter().map(String::as_str));
     headers.extend_from_slice(SPE_COLUMNS);
     let widths = vec![
         48.0, 8.0, 28.0, 20.0, 10.0, 14.0, 96.0, 18.0, 10.0, 10.0, 10.0, 12.0, 14.0, 18.0,
@@ -289,8 +289,8 @@ fn write_line_sheet(
         worksheet.write_number(row, 12, line.self_weight)?;
         worksheet.write_number(row, 13, line.accumulated_weight)?;
         let mut col = 14_u16;
-        for key in RAW_PMU_COLUMNS.iter().chain(DERIVED_PMU_COLUMNS.iter()) {
-            write_metric_cell(worksheet, row, col, line.pmu_values.get(*key), styles)?;
+        for key in pmu_columns {
+            write_metric_cell(worksheet, row, col, line.pmu_values.get(key), styles)?;
             col += 1;
         }
         for key in SPE_COLUMNS {

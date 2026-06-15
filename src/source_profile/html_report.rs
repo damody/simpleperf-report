@@ -32,10 +32,6 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
         "sample_count".to_string(),
         "self_weight".to_string(),
         "accumulated_weight".to_string(),
-        "p_pct".to_string(),
-        "acc_p_pct".to_string(),
-        "file_p_pct".to_string(),
-        "file_acc_p_pct".to_string(),
     ];
     default_source_columns.extend(raw_pmu_columns.iter().cloned());
     default_source_columns.extend([
@@ -43,7 +39,6 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
         "l1d_cache_hit_rate".to_string(),
         "mips".to_string(),
         "mcps".to_string(),
-        "status".to_string(),
         "code".to_string(),
     ]);
     let default_source_columns_json =
@@ -662,6 +657,12 @@ mod tests {
         let output = root.join("target/source_profile_tests/SourceLine.summary.html");
         write_html_summary(&bundle, &output).unwrap();
         let html = fs::read_to_string(output).unwrap();
+        let default_columns_start = html.find("const DEFAULT_SOURCE_COLUMNS = ").unwrap();
+        let default_columns_end = html[default_columns_start..]
+            .find(";\n    let visibleSourceColumns")
+            .unwrap()
+            + default_columns_start;
+        let default_columns = &html[default_columns_start..default_columns_end];
         assert!(html.contains("SourceLine Report"));
         assert!(html.contains("fixture-minimal-001"));
         assert!(html.contains("PMU buffer pages"));
@@ -699,6 +700,11 @@ mod tests {
         assert!(html.contains("renderSourceBody"));
         assert!(html.contains("sample_count"));
         assert!(html.contains("Samples"));
+        assert!(!default_columns.contains("\"p_pct\""));
+        assert!(!default_columns.contains("\"acc_p_pct\""));
+        assert!(!default_columns.contains("\"file_p_pct\""));
+        assert!(!default_columns.contains("\"file_acc_p_pct\""));
+        assert!(!default_columns.contains("\"status\""));
         assert!(html.contains("cpu_cycles"));
         assert!(html.contains("stall_backend"));
         assert!(html.contains("spe_sample_count"));

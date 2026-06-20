@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
@@ -84,6 +85,7 @@ pub struct SourceArgs {
 }
 
 pub fn run_source_command(args: SourceArgs) -> Result<()> {
+    let total_start = Instant::now();
     validate_source_args(&args)?;
     if args.httpd {
         let db = args.db.as_ref().expect("validated --db");
@@ -130,33 +132,55 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
         args.out_dir.display()
     );
     let shared_model = if args.html || args.annotated_source_out.is_some() {
-        Some(build_report_model(&bundle)?)
+        let start = Instant::now();
+        let model = build_report_model(&bundle)?;
+        log_timing("source_command.build_report_model", start.elapsed());
+        Some(model)
     } else {
         None
     };
 
     if args.html {
         let model = shared_model.as_ref().expect("shared model built for html");
+        let start = Instant::now();
         write_report_db_from_model(&bundle, model, &args.out_dir.join("SourceLine.sqlite"))?;
+        log_timing("source_command.write_sqlite", start.elapsed());
+        let start = Instant::now();
         write_html_summary_from_model(&bundle, model, &args.out_dir.join("SourceLine.html"))?;
+        log_timing("source_command.write_html", start.elapsed());
+        let start = Instant::now();
         write_report_launcher(&args.out_dir)?;
+        log_timing("source_command.write_launcher", start.elapsed());
     }
     if args.xlsx {
+        let start = Instant::now();
         write_summary_workbook(&bundle, &args.out_dir.join("SourceLine.xlsx"))?;
+        log_timing("source_command.write_xlsx", start.elapsed());
     }
     if args.json {
+        let start = Instant::now();
         write_source_line_json(&bundle, &args.out_dir.join("SourceLine.json"))?;
+        log_timing("source_command.write_json", start.elapsed());
     }
     if args.csv {
+        let start = Instant::now();
         write_csv_exports(&bundle, &args.out_dir.join("csv"))?;
+        log_timing("source_command.write_csv", start.elapsed());
     }
     if let Some(output_dir) = &args.annotated_source_out {
         let model = shared_model
             .as_ref()
             .expect("shared model built for annotated source");
+        let start = Instant::now();
         write_annotated_sources_from_model(&bundle, model, output_dir)?;
+        log_timing("source_command.write_annotated_source", start.elapsed());
     }
+    log_timing("source_command.total", total_start.elapsed());
     Ok(())
+}
+
+fn log_timing(phase: &str, elapsed: Duration) {
+    eprintln!("[MProfilerTiming] {phase} ({:.1}s)", elapsed.as_secs_f64());
 }
 
 fn validate_source_args(args: &SourceArgs) -> Result<()> {

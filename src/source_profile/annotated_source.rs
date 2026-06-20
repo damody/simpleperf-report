@@ -153,7 +153,7 @@ fn annotated_source_worker_count(entry_count: usize) -> usize {
     let available = std::thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
-    entry_count.max(1).min(available).min(4)
+    entry_count.max(1).min(available).min(8)
 }
 
 fn is_within_source_roots(path: &Path, roots: &[PathBuf]) -> bool {
@@ -292,6 +292,10 @@ fn discover_mprofiler_astyle() -> Option<FormatterCommand> {
         }
     }
 
+    if !env_flag_enabled("MPROFILER_ASTYLE_AUTO_DISCOVER") {
+        return None;
+    }
+
     let mut roots = Vec::new();
     if let Ok(exe) = env::current_exe() {
         roots.extend(exe.ancestors().map(Path::to_path_buf));
@@ -316,6 +320,17 @@ fn discover_mprofiler_astyle() -> Option<FormatterCommand> {
         }
     }
     None
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn astyle_candidates(root: &Path) -> Vec<PathBuf> {
@@ -588,7 +603,7 @@ mod tests {
     fn annotated_source_worker_count_is_bounded() {
         assert_eq!(annotated_source_worker_count(0), 1);
         assert!(annotated_source_worker_count(1) >= 1);
-        assert!(annotated_source_worker_count(1000) <= 4);
+        assert!(annotated_source_worker_count(1000) <= 8);
     }
 
     #[test]

@@ -133,6 +133,7 @@ pub fn write_report_db_from_model(
         }
     }
 
+    create_indexes(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -199,6 +200,14 @@ fn create_schema(conn: &Connection) -> Result<()> {
             hot_lines TEXT NOT NULL
         );
 
+        "#,
+    )?;
+    Ok(())
+}
+
+fn create_indexes(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        r#"
         CREATE INDEX source_lines_file_idx ON source_lines(file);
         CREATE INDEX source_lines_function_idx ON source_lines(function);
         CREATE INDEX source_lines_status_idx ON source_lines(status);

@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSymbol, SymbolKind};
@@ -16,6 +17,7 @@ use super::metrics::{
     MetricValue, PmuAddressAggregate, SpeAddressAggregate,
 };
 use super::sample_stream::{for_each_pmu_sample, read_spe_samples, PmuSample};
+use super::schema::ProcessMapRecord;
 use super::source_loader::load_source_file;
 use super::symbol_resolver::{discover_debug_elfs, match_debug_elfs, ElfMatchQuality};
 
@@ -266,6 +268,8 @@ impl MutableLineRow {
 }
 
 pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
+    let total_start = Instant::now();
+    let mut phase_start = Instant::now();
     let source_files = discover_source_files(bundle)?;
     let source_roots = absolute_source_roots(bundle);
     let path_remaps = absolute_path_remaps(bundle);
@@ -282,7 +286,12 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 .or_insert_with(|| MutableLineRow::new(line.file, line.line_number, line.code));
         }
     }
+    log_timing(
+        "build_model.source_discovery_and_preload",
+        phase_start.elapsed(),
+    );
 
+    phase_start = Instant::now();
     let elf_matches = load_elf_matches(bundle)?;
     let mut warnings = collect_quality_warnings(bundle);
     let mut line_resolver = CachedElfLineResolver::default();
@@ -306,11 +315,16 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
             ));
         }
     }
+    log_timing("build_model.elf_matching", phase_start.elapsed());
 
     if let Some(path) = &bundle.pmu_samples_path {
+        phase_start = Instant::now();
         let stack_report = build_pmu_stack_fallback(bundle, path, &elf_matches)?;
         frames = stack_report.0;
         callchains = stack_report.1;
+        log_timing("build_model.pmu_stack_fallback", phase_start.elapsed());
+
+        phase_start = Instant::now();
         let aggregate_result = aggregate_pmu_file(path, &bundle.event_catalog)?;
         append_cpu_coverage_diagnostic(
             bundle,
@@ -324,6 +338,9 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
             &mut warnings,
         );
         let aggregates = aggregate_result.rows;
+        log_timing("build_model.pmu_aggregate", phase_start.elapsed());
+
+        phase_start = Instant::now();
         for (key, aggregate) in aggregates {
             if let Some((file, line, function, module)) = resolve_key(
                 bundle,
@@ -352,11 +369,16 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 ));
             }
         }
+        log_timing("build_model.pmu_resolve_merge_rows", phase_start.elapsed());
     }
 
     if let Some(path) = &bundle.spe_samples_path {
+        phase_start = Instant::now();
         let (_, samples) = read_spe_samples(path)?;
         let aggregates = aggregate_spe_by_address(&samples);
+        log_timing("build_model.spe_read_aggregate", phase_start.elapsed());
+
+        phase_start = Instant::now();
         for (key, aggregate) in aggregates {
             let sample_meta = samples
                 .iter()
@@ -392,13 +414,17 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 ));
             }
         }
+        log_timing("build_model.spe_resolve_merge_rows", phase_start.elapsed());
     }
 
+    phase_start = Instant::now();
     let mut line_rows = finalize_rows(bundle, rows);
     compute_row_percentages(&mut line_rows);
     append_attribution_diagnostics(bundle, &line_rows, &mut warnings);
     let files = summarize_files(&line_rows);
     let functions = summarize_functions(&line_rows);
+    log_timing("build_model.finalize_summaries", phase_start.elapsed());
+    log_timing("build_model.total", total_start.elapsed());
     Ok(ReportModel {
         rows: line_rows,
         files,
@@ -407,6 +433,10 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         callchains,
         warnings,
     })
+}
+
+fn log_timing(phase: &str, elapsed: Duration) {
+    eprintln!("[MProfilerTiming] {phase} ({:.1}s)", elapsed.as_secs_f64());
 }
 
 fn load_elf_matches(
@@ -504,18 +534,18 @@ fn resolve_key(
     else {
         return Ok(None);
     };
-    let Some(relative) = runtime_address_to_relative(&bundle.maps.maps, ip) else {
+    let Some(relative_address) = relative_address_for_mapping(mapping, ip) else {
         return Ok(None);
     };
-    let Some(matched) = elf_matches.get(&relative.module_id) else {
+    let Some(matched) = elf_matches.get(&mapping.module_id) else {
         return Ok(None);
     };
     let Some(elf_path) = &matched.candidate_path else {
         return Ok(None);
     };
     let Some(location) = line_resolver
-        .resolve(elf_path, relative.relative_address)
-        .with_context(|| format!("Failed to resolve 0x{:x}", relative.relative_address))?
+        .resolve(elf_path, relative_address)
+        .with_context(|| format!("Failed to resolve 0x{:x}", relative_address))?
     else {
         return Ok(None);
     };
@@ -535,6 +565,21 @@ fn resolve_key(
         location.function.unwrap_or_default(),
         mapping.module_id.clone(),
     )))
+}
+
+fn relative_address_for_mapping(mapping: &ProcessMapRecord, ip: u64) -> Option<u64> {
+    if ip < mapping.start || ip >= mapping.end {
+        return None;
+    }
+    if mapping.load_bias != 0 {
+        if mapping.load_bias >= 0 {
+            ip.checked_sub(mapping.load_bias as u64)
+        } else {
+            ip.checked_add((-mapping.load_bias) as u64)
+        }
+    } else {
+        ip.checked_sub(mapping.start)?.checked_add(mapping.offset)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -678,9 +723,17 @@ fn build_pmu_stack_fallback(
     let symbols = SymbolNameCache::from_matches(elf_matches)?;
     let mut frames = BTreeMap::<FrameKey, MutableFrameRow>::new();
     let mut callchains = BTreeMap::<String, MutableCallchainRow>::new();
+    let mut address_cache = BTreeMap::<u64, NamedAddress>::new();
 
     for_each_pmu_sample(path, |sample| {
-        aggregate_stack_sample(bundle, &symbols, &mut frames, &mut callchains, &sample);
+        aggregate_stack_sample(
+            bundle,
+            &symbols,
+            &mut address_cache,
+            &mut frames,
+            &mut callchains,
+            &sample,
+        );
         Ok(())
     })?;
 
@@ -754,6 +807,7 @@ fn build_pmu_stack_fallback(
 fn aggregate_stack_sample(
     bundle: &SourceProfileBundle,
     symbols: &SymbolNameCache,
+    address_cache: &mut BTreeMap<u64, NamedAddress>,
     frames: &mut BTreeMap<FrameKey, MutableFrameRow>,
     callchains: &mut BTreeMap<String, MutableCallchainRow>,
     sample: &PmuSample,
@@ -765,7 +819,7 @@ fn aggregate_stack_sample(
         .map(|event| event.event_key.as_str())
         .unwrap_or("unknown_event")
         .to_string();
-    let leaf = describe_runtime_ip(bundle, symbols, sample.ip);
+    let leaf = describe_runtime_ip_cached(bundle, symbols, address_cache, sample.ip);
     add_frame_row(
         frames,
         "self",
@@ -779,7 +833,7 @@ fn aggregate_stack_sample(
     let mut stack = Vec::with_capacity(sample.callchain_ips.len() + 1);
     stack.push(frame_label(&leaf));
     for ip in &sample.callchain_ips {
-        let frame = describe_runtime_ip(bundle, symbols, *ip);
+        let frame = describe_runtime_ip_cached(bundle, symbols, address_cache, *ip);
         add_frame_row(
             frames,
             "callchain",
@@ -830,6 +884,20 @@ fn add_frame_row(
     row.accumulated_weight += accumulated_weight;
     *row.event_weights.entry(event_key.to_string()).or_default() +=
         self_weight.saturating_add(accumulated_weight);
+}
+
+fn describe_runtime_ip_cached(
+    bundle: &SourceProfileBundle,
+    symbols: &SymbolNameCache,
+    cache: &mut BTreeMap<u64, NamedAddress>,
+    ip: u64,
+) -> NamedAddress {
+    if let Some(frame) = cache.get(&ip) {
+        return frame.clone();
+    }
+    let frame = describe_runtime_ip(bundle, symbols, ip);
+    cache.insert(ip, frame.clone());
+    frame
 }
 
 fn describe_runtime_ip(
@@ -1450,6 +1518,8 @@ fn should_skip_source_dir(dir: &Path) -> bool {
         name,
         ".git"
             | ".vs"
+            | "reports"
+            | "annotated_source"
             | "Binaries"
             | "DerivedDataCache"
             | "Intermediate"
@@ -1457,7 +1527,7 @@ fn should_skip_source_dir(dir: &Path) -> bool {
             | "Build"
             | "target"
             | "node_modules"
-    )
+    ) || name.starts_with("annotated_files")
 }
 
 fn is_source_file(path: &Path) -> bool {

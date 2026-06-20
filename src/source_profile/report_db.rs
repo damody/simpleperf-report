@@ -6,9 +6,18 @@ use rusqlite::{params, Connection};
 use serde_json::json;
 
 use super::bundle::SourceProfileBundle;
-use super::report_model::{build_report_model, metric_value_text};
+use super::report_model::{build_report_model, metric_value_text, ReportModel};
 
 pub fn write_report_db(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
+    let model = build_report_model(bundle)?;
+    write_report_db_from_model(bundle, &model, output)
+}
+
+pub fn write_report_db_from_model(
+    bundle: &SourceProfileBundle,
+    model: &ReportModel,
+    output: &Path,
+) -> Result<()> {
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create '{}'", parent.display()))?;
@@ -18,7 +27,6 @@ pub fn write_report_db(bundle: &SourceProfileBundle, output: &Path) -> Result<()
             .with_context(|| format!("Failed to replace '{}'", output.display()))?;
     }
 
-    let model = build_report_model(bundle)?;
     let mut conn = Connection::open(output)
         .with_context(|| format!("Failed to create '{}'", output.display()))?;
     create_schema(&conn)?;
@@ -40,7 +48,7 @@ pub fn write_report_db(bundle: &SourceProfileBundle, output: &Path) -> Result<()
         "pmu_lane": bundle.manifest.lanes.pmu,
         "spe_lane": bundle.manifest.lanes.spe,
         "capture_options": bundle.manifest.capture_options,
-        "warnings": model.warnings,
+        "warnings": &model.warnings,
     });
     tx.execute(
         "INSERT INTO metadata(key, value) VALUES('summary', ?1)",
@@ -259,5 +267,25 @@ mod tests {
             sample_count_total > 0,
             "expected line sample counts in sqlite"
         );
+    }
+
+    #[test]
+    fn writes_sqlite_report_from_prebuilt_model() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = crate::source_profile::report_model::build_report_model(&bundle).unwrap();
+        let output = root.join("target/source_profile_tests/report_db_from_model/SourceLine.sqlite");
+        if output.exists() {
+            fs::remove_file(&output).unwrap();
+        }
+
+        write_report_db_from_model(&bundle, &model, &output).unwrap();
+
+        let conn = Connection::open(&output).unwrap();
+        let line_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM source_lines", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(line_count as usize, model.rows.len());
     }
 }

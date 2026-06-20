@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, SPE_COLUMNS,
+    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, ReportModel, SPE_COLUMNS,
 };
 use super::summary::SourceReportSummary;
 
@@ -16,12 +16,20 @@ pub trait HtmlReportWriter {
 }
 
 pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
+    let model = build_report_model(bundle)?;
+    write_html_summary_from_model(bundle, &model, output)
+}
+
+pub fn write_html_summary_from_model(
+    bundle: &SourceProfileBundle,
+    model: &ReportModel,
+    output: &Path,
+) -> Result<()> {
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create '{}'", parent.display()))?;
     }
     let manifest = &bundle.manifest;
-    let model = build_report_model(bundle)?;
     let raw_pmu_columns = pmu_raw_column_keys(bundle);
     let raw_pmu_columns_json =
         serde_json::to_string(&raw_pmu_columns).unwrap_or_else(|_| "[]".to_string());
@@ -1021,5 +1029,21 @@ mod tests {
         assert!(html.contains("function_only"));
         assert!(html.contains("/api/summary"));
         assert!(!html.contains("const sourceRows ="));
+    }
+
+    #[test]
+    fn writes_html_summary_from_prebuilt_model() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = crate::source_profile::report_model::build_report_model(&bundle).unwrap();
+        let output = root.join("target/source_profile_tests/SourceLine.from_model.html");
+
+        write_html_summary_from_model(&bundle, &model, &output).unwrap();
+
+        let html = fs::read_to_string(output).unwrap();
+        assert!(html.contains("SourceLine Report"));
+        assert!(html.contains("fixture-minimal-001"));
+        assert!(html.contains("/api/source-lines"));
     }
 }

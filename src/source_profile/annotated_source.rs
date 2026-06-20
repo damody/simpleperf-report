@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, metric_value_text, pmu_column_keys, ReportLineRow, SPE_COLUMNS,
+    build_report_model, metric_value_text, pmu_column_keys, ReportLineRow, ReportModel, SPE_COLUMNS,
 };
 use super::source_loader::load_source_file;
 
@@ -39,9 +39,17 @@ struct SkippedAnnotatedSourceFile {
 }
 
 pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) -> Result<()> {
+    let model = build_report_model(bundle)?;
+    write_annotated_sources_from_model(bundle, &model, output_dir)
+}
+
+pub fn write_annotated_sources_from_model(
+    bundle: &SourceProfileBundle,
+    model: &ReportModel,
+    output_dir: &Path,
+) -> Result<()> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create '{}'", output_dir.display()))?;
-    let model = build_report_model(bundle)?;
     let pmu_columns = pmu_column_keys(bundle);
     let roots = absolute_source_roots(bundle);
     let formatter = discover_mprofiler_astyle();

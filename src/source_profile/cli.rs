@@ -5,13 +5,14 @@ use anyhow::{bail, Context, Result};
 use clap::Args;
 use log::info;
 
-use super::annotated_source::write_annotated_sources;
+use super::annotated_source::write_annotated_sources_from_model;
 use super::bundle::SourceProfileBundle;
-use super::html_report::write_html_summary;
+use super::html_report::write_html_summary_from_model;
 use super::httpd::run_httpd;
 use super::machine_report::{write_csv_exports, write_source_line_json};
-use super::report_db::write_report_db;
+use super::report_db::write_report_db_from_model;
 use super::report_launcher::write_report_launcher;
+use super::report_model::build_report_model;
 use super::schema::PathRemap;
 use super::xlsx_report::write_summary_workbook;
 
@@ -128,9 +129,16 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
         path_remaps.len(),
         args.out_dir.display()
     );
+    let shared_model = if args.html || args.annotated_source_out.is_some() {
+        Some(build_report_model(&bundle)?)
+    } else {
+        None
+    };
+
     if args.html {
-        write_report_db(&bundle, &args.out_dir.join("SourceLine.sqlite"))?;
-        write_html_summary(&bundle, &args.out_dir.join("SourceLine.html"))?;
+        let model = shared_model.as_ref().expect("shared model built for html");
+        write_report_db_from_model(&bundle, model, &args.out_dir.join("SourceLine.sqlite"))?;
+        write_html_summary_from_model(&bundle, model, &args.out_dir.join("SourceLine.html"))?;
         write_report_launcher(&args.out_dir)?;
     }
     if args.xlsx {
@@ -143,7 +151,10 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
         write_csv_exports(&bundle, &args.out_dir.join("csv"))?;
     }
     if let Some(output_dir) = &args.annotated_source_out {
-        write_annotated_sources(&bundle, output_dir)?;
+        let model = shared_model
+            .as_ref()
+            .expect("shared model built for annotated source");
+        write_annotated_sources_from_model(&bundle, model, output_dir)?;
     }
     Ok(())
 }
@@ -271,5 +282,38 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Annotated source output path"));
+    }
+
+    #[test]
+    fn source_command_generates_html_and_annotated_source_in_one_invocation() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let out = root.join("target/source_profile_tests/cli_combined_html_annotated");
+        let _ = fs::remove_dir_all(&out);
+
+        let args = SourceArgs {
+            bundle: Some(root.join("fixtures/source_profile/minimal")),
+            elfs: Vec::new(),
+            source_roots: vec![root.join("fixtures/source_profile/minimal/src")],
+            path_remaps: Vec::new(),
+            out_dir: out.clone(),
+            html: true,
+            xlsx: false,
+            json: false,
+            csv: false,
+            no_browser: true,
+            nonzero_threshold: 0.0,
+            annotated_source_out: Some(out.join("annotated_source")),
+            httpd: false,
+            db: None,
+            http_port: 9600,
+            listen_ip: "127.0.0.1".to_string(),
+        };
+
+        run_source_command(args).unwrap();
+
+        assert!(out.join("SourceLine.html").exists());
+        assert!(out.join("SourceLine.sqlite").exists());
+        assert!(out.join("run_html.bat").exists());
+        assert!(out.join("annotated_source/manifest.json").exists());
     }
 }

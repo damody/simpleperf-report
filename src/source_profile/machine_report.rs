@@ -30,6 +30,10 @@ pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Re
         },
         "columns": columns(bundle),
         "rows": model.rows.iter().map(|row| row_to_values(row, bundle)).collect::<Vec<_>>(),
+        "callchain_frame_columns": frame_columns(),
+        "callchain_frames": model.frames.iter().map(frame_to_values).collect::<Vec<_>>(),
+        "callchain_columns": callchain_columns(),
+        "callchains": model.callchains.iter().map(callchain_to_values).collect::<Vec<_>>(),
         "warnings": model.warnings
     });
     fs::write(output, serde_json::to_vec_pretty(&report)?)
@@ -115,6 +119,20 @@ pub fn write_csv_exports(bundle: &SourceProfileBundle, output_dir: &Path) -> Res
                 ]
             })
             .collect::<Vec<_>>(),
+    )?;
+    write_csv(
+        &output_dir.join("CallchainFrames.csv"),
+        &frame_columns(),
+        &model.frames.iter().map(frame_to_values).collect::<Vec<_>>(),
+    )?;
+    write_csv(
+        &output_dir.join("Callchains.csv"),
+        &callchain_columns(),
+        &model
+            .callchains
+            .iter()
+            .map(callchain_to_values)
+            .collect::<Vec<_>>(),
     )
 }
 
@@ -167,6 +185,80 @@ fn row_to_values(
         values.push(metric_value_text(row.spe_values.get(*key)));
     }
     values
+}
+
+fn frame_columns() -> Vec<String> {
+    [
+        "role",
+        "module",
+        "function",
+        "ip",
+        "relative_address",
+        "mapping_id",
+        "cpu",
+        "thread",
+        "sample_count",
+        "self_weight",
+        "acc_weight",
+        "p_pct",
+        "acc_p_pct",
+        "event_weights",
+        "status",
+    ]
+    .iter()
+    .map(|value| (*value).to_string())
+    .collect()
+}
+
+fn frame_to_values(row: &super::report_model::ReportFrameRow) -> Vec<String> {
+    vec![
+        row.role.clone(),
+        row.module.clone(),
+        row.function.clone(),
+        format!("0x{:x}", row.ip),
+        format!("0x{:x}", row.relative_address),
+        row.mapping_id.to_string(),
+        row.cpu.clone(),
+        row.thread.clone(),
+        row.sample_count.to_string(),
+        format!("{:.0}", row.self_weight),
+        format!("{:.0}", row.accumulated_weight),
+        format!("{:.6}", row.p_pct),
+        format!("{:.6}", row.acc_p_pct),
+        row.event_weights.clone(),
+        row.status.clone(),
+    ]
+}
+
+fn callchain_columns() -> Vec<String> {
+    [
+        "stack",
+        "leaf",
+        "root",
+        "cpu",
+        "thread",
+        "sample_count",
+        "weight",
+        "p_pct",
+        "event_weights",
+    ]
+    .iter()
+    .map(|value| (*value).to_string())
+    .collect()
+}
+
+fn callchain_to_values(row: &super::report_model::ReportCallchainRow) -> Vec<String> {
+    vec![
+        row.stack.clone(),
+        row.leaf.clone(),
+        row.root.clone(),
+        row.cpu.clone(),
+        row.thread.clone(),
+        row.sample_count.to_string(),
+        format!("{:.0}", row.weight),
+        format!("{:.6}", row.p_pct),
+        row.event_weights.clone(),
+    ]
 }
 
 fn write_csv<S: AsRef<str>>(path: &Path, headers: &[S], rows: &[Vec<String>]) -> Result<()> {

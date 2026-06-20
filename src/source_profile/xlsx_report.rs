@@ -187,6 +187,14 @@ pub fn write_summary_workbook(bundle: &SourceProfileBundle, output: &Path) -> Re
     functions.set_name("Functions")?;
     write_functions_sheet(functions, &model.functions, &styles)?;
 
+    let frames = workbook.add_worksheet();
+    frames.set_name("Callchain Frames")?;
+    write_frames_sheet(frames, &model.frames, &styles)?;
+
+    let callchains = workbook.add_worksheet();
+    callchains.set_name("Callchains")?;
+    write_callchains_sheet(callchains, &model.callchains, &styles)?;
+
     let column_help = workbook.add_worksheet();
     column_help.set_name("Column Help")?;
     write_column_help_sheet(column_help, &styles)?;
@@ -393,6 +401,105 @@ fn write_functions_sheet(
         worksheet.write_number(row, 7, line.sample_count as f64)?;
         worksheet.write_string(row, 8, &line.hot_lines)?;
         row += 1;
+    }
+    Ok(())
+}
+
+fn write_frames_sheet(
+    worksheet: &mut Worksheet,
+    lines: &[super::report_model::ReportFrameRow],
+    styles: &WorkbookStyles,
+) -> Result<()> {
+    format_basic_sheet(
+        worksheet,
+        1,
+        14,
+        &[
+            12.0, 24.0, 56.0, 18.0, 18.0, 12.0, 12.0, 16.0, 14.0, 14.0, 18.0, 10.0, 10.0, 48.0,
+            18.0,
+        ],
+    )?;
+    for (col, header) in [
+        "Role",
+        "Module",
+        "Function",
+        "IP",
+        "Relative Address",
+        "Mapping ID",
+        "CPU",
+        "Thread",
+        "Sample Count",
+        "Self Weight",
+        "Accumulated Weight",
+        "p %",
+        "acc_p %",
+        "Event Weights",
+        "Status",
+    ]
+    .iter()
+    .enumerate()
+    {
+        worksheet.write_string_with_format(0, col as u16, *header, &styles.header)?;
+    }
+    for (index, line) in lines.iter().take(200_000).enumerate() {
+        let row = (index + 1) as u32;
+        worksheet.write_string(row, 0, &line.role)?;
+        worksheet.write_string(row, 1, &line.module)?;
+        worksheet.write_string(row, 2, &line.function)?;
+        worksheet.write_string(row, 3, format!("0x{:x}", line.ip))?;
+        worksheet.write_string(row, 4, format!("0x{:x}", line.relative_address))?;
+        worksheet.write_number(row, 5, line.mapping_id as f64)?;
+        worksheet.write_string(row, 6, &line.cpu)?;
+        worksheet.write_string(row, 7, &line.thread)?;
+        worksheet.write_number(row, 8, line.sample_count as f64)?;
+        worksheet.write_number(row, 9, line.self_weight)?;
+        worksheet.write_number(row, 10, line.accumulated_weight)?;
+        worksheet.write_number(row, 11, line.p_pct)?;
+        worksheet.write_number(row, 12, line.acc_p_pct)?;
+        worksheet.write_string(row, 13, &line.event_weights)?;
+        worksheet.write_string(row, 14, &line.status)?;
+    }
+    Ok(())
+}
+
+fn write_callchains_sheet(
+    worksheet: &mut Worksheet,
+    lines: &[super::report_model::ReportCallchainRow],
+    styles: &WorkbookStyles,
+) -> Result<()> {
+    format_basic_sheet(
+        worksheet,
+        1,
+        8,
+        &[120.0, 56.0, 56.0, 12.0, 16.0, 14.0, 14.0, 10.0, 48.0],
+    )?;
+    for (col, header) in [
+        "Stack",
+        "Leaf",
+        "Root",
+        "CPU",
+        "Thread",
+        "Sample Count",
+        "Weight",
+        "p %",
+        "Event Weights",
+    ]
+    .iter()
+    .enumerate()
+    {
+        worksheet.write_string_with_format(0, col as u16, *header, &styles.header)?;
+    }
+    for (index, line) in lines.iter().take(200_000).enumerate() {
+        let row = (index + 1) as u32;
+        worksheet.write_string(row, 0, &line.stack)?;
+        worksheet.write_string(row, 1, &line.leaf)?;
+        worksheet.write_string(row, 2, &line.root)?;
+        worksheet.write_string(row, 3, &line.cpu)?;
+        worksheet.write_string(row, 4, &line.thread)?;
+        worksheet.write_number(row, 5, line.sample_count as f64)?;
+        worksheet.write_number(row, 6, line.weight)?;
+        worksheet.write_number(row, 7, line.p_pct)?;
+        worksheet.write_string(row, 8, &line.event_weights)?;
     }
     Ok(())
 }

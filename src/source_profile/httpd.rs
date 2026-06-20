@@ -15,7 +15,7 @@ use rusqlite::{params_from_iter, types::Value, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
-use super::report_model::{DERIVED_PMU_COLUMNS, RAW_PMU_COLUMNS, SPE_COLUMNS};
+use super::report_model::SPE_COLUMNS;
 
 pub const DEFAULT_PAGE_SIZE: u32 = 1000;
 pub const MAX_PAGE_SIZE: u32 = 10000;
@@ -461,13 +461,13 @@ fn source_order_by(
         "l1d_cache_hit_rate" => "CAST(l1d_cache_hit_rate AS REAL)",
         "mips" => "CAST(mips AS REAL)",
         "mcps" => "CAST(mcps AS REAL)",
-        key if RAW_PMU_COLUMNS.contains(&key) || DERIVED_PMU_COLUMNS.contains(&key) => {
-            return metric_order_by("pmu_json", key, desc, sampled_first, function_first);
-        }
         key if SPE_COLUMNS.contains(&key) => {
             return metric_order_by("spe_json", key, desc, sampled_first, function_first);
         }
         "code" => "code",
+        key if is_metric_sort_key(key) => {
+            return metric_order_by("pmu_json", key, desc, sampled_first, function_first);
+        }
         _ => "file",
     };
     let direction = if desc { "DESC" } else { "ASC" };
@@ -482,6 +482,11 @@ fn source_order_by(
         ""
     };
     format!("ORDER BY {sampled_prefix}{function_prefix}{column} {direction}, file ASC, line ASC")
+}
+
+fn is_metric_sort_key(key: &str) -> bool {
+    key.chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn metric_order_by(
@@ -745,11 +750,11 @@ mod tests {
         assert!(response
             .rows
             .iter()
-            .any(|row| row.pmu_values.contains_key("stall_backend")));
+            .any(|row| row.pmu_values.contains_key("inst_retired")));
         assert!(response
             .rows
             .iter()
-            .any(|row| row.annotation.contains("stall_backend=")));
+            .all(|row| !row.annotation.contains("stall_backend=")));
         assert!(response
             .rows
             .iter()

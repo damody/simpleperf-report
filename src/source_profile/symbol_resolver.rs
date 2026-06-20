@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::{fs, io::Read, path::Path};
 
 use anyhow::{Context, Result};
-use object::Object;
+use object::{Object, ObjectSection};
 
 use super::schema::BuildIdRecord;
 
@@ -12,6 +12,7 @@ use super::schema::BuildIdRecord;
 pub struct DebugElfCandidate {
     pub path: PathBuf,
     pub match_quality: ElfMatchQuality,
+    pub has_dwarf_debug_info: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,7 @@ pub struct ElfMatch {
     pub candidate_path: Option<PathBuf>,
     pub quality: ElfMatchQuality,
     pub reason: String,
+    pub has_dwarf_debug_info: bool,
 }
 
 pub fn match_debug_elfs(
@@ -49,6 +51,7 @@ pub fn match_debug_elfs(
             file_size: fs::metadata(&candidate.path)
                 .ok()
                 .map(|metadata| metadata.len()),
+            has_dwarf_debug_info: candidate.has_dwarf_debug_info,
         });
     }
 
@@ -95,6 +98,7 @@ fn maybe_push_elf(path: &Path, candidates: &mut Vec<DebugElfCandidate>) -> Resul
     candidates.push(DebugElfCandidate {
         path: path.to_path_buf(),
         match_quality: ElfMatchQuality::PathHint,
+        has_dwarf_debug_info: has_dwarf_debug_info(path)?,
     });
     Ok(())
 }
@@ -128,6 +132,7 @@ struct CandidateInfo {
     path: PathBuf,
     build_id: Option<String>,
     file_size: Option<u64>,
+    has_dwarf_debug_info: bool,
 }
 
 fn match_one_module(module: &BuildIdRecord, candidates: &[CandidateInfo]) -> ElfMatch {
@@ -200,6 +205,7 @@ fn match_one_module(module: &BuildIdRecord, candidates: &[CandidateInfo]) -> Elf
         candidate_path: None,
         quality: ElfMatchQuality::Missing,
         reason: "no debug ELF candidate matched".to_string(),
+        has_dwarf_debug_info: false,
     }
 }
 
@@ -215,6 +221,7 @@ fn make_match(
         candidate_path: Some(candidate.path.clone()),
         quality,
         reason: reason.to_string(),
+        has_dwarf_debug_info: candidate.has_dwarf_debug_info,
     }
 }
 
@@ -232,6 +239,24 @@ fn read_elf_build_id(path: &Path) -> Result<Option<String>> {
         .build_id()
         .with_context(|| format!("Failed to read build-id from '{}'", path.display()))?
         .map(hex_lower))
+}
+
+fn has_dwarf_debug_info(path: &Path) -> Result<bool> {
+    let file_handle =
+        fs::File::open(path).with_context(|| format!("Failed to open '{}'", path.display()))?;
+    let data = unsafe {
+        memmap2::MmapOptions::new()
+            .map(&file_handle)
+            .with_context(|| format!("Failed to mmap '{}'", path.display()))?
+    };
+    let file = object::File::parse(&*data)
+        .with_context(|| format!("Failed to parse ELF '{}'", path.display()))?;
+    Ok(file.sections().any(|section| {
+        matches!(
+            section.name().ok(),
+            Some(".debug_line" | ".debug_info" | ".zdebug_line" | ".zdebug_info")
+        )
+    }))
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

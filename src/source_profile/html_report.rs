@@ -6,7 +6,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::bundle::SourceProfileBundle;
-use super::report_model::pmu_raw_column_keys;
+use super::report_model::{
+    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, SPE_COLUMNS,
+};
 use super::summary::SourceReportSummary;
 
 pub trait HtmlReportWriter {
@@ -19,9 +21,13 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
             .with_context(|| format!("Failed to create '{}'", parent.display()))?;
     }
     let manifest = &bundle.manifest;
+    let model = build_report_model(bundle)?;
     let raw_pmu_columns = pmu_raw_column_keys(bundle);
     let raw_pmu_columns_json =
         serde_json::to_string(&raw_pmu_columns).unwrap_or_else(|_| "[]".to_string());
+    let derived_pmu_columns = pmu_derived_column_keys(bundle);
+    let derived_pmu_columns_json =
+        serde_json::to_string(&derived_pmu_columns).unwrap_or_else(|_| "[]".to_string());
     let mut default_source_columns = vec![
         "file".to_string(),
         "line".to_string(),
@@ -30,17 +36,10 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
         "cpu".to_string(),
         "thread".to_string(),
         "sample_count".to_string(),
-        "self_weight".to_string(),
-        "accumulated_weight".to_string(),
     ];
     default_source_columns.extend(raw_pmu_columns.iter().cloned());
-    default_source_columns.extend([
-        "cpi".to_string(),
-        "l1d_cache_hit_rate".to_string(),
-        "mips".to_string(),
-        "mcps".to_string(),
-        "code".to_string(),
-    ]);
+    default_source_columns.extend(derived_pmu_columns.iter().cloned());
+    default_source_columns.push("code".to_string());
     let default_source_columns_json =
         serde_json::to_string(&default_source_columns).unwrap_or_else(|_| "[]".to_string());
     let html = format!(
@@ -73,7 +72,6 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
     #sourceTable .col-thread {{ width: 170px; max-width: 170px; }}
     #sourceTable .col-metric {{ width: 92px; }}
     #sourceTable .col-wide-metric {{ width: 132px; }}
-    #sourceTable .col-status {{ width: 170px; max-width: 170px; }}
     #sourceTable .col-code {{ width: 360px; max-width: 360px; }}
     #sourceTable code {{ white-space: nowrap; }}
     #sourceTable th[data-source-sort] {{ user-select: none; }}
@@ -85,11 +83,17 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
     .source-line.NonZero {{ background: #fff8c5; }}
     .source-line.Missing {{ background: #ffebe9; }}
     .source-line.Unresolved {{ background: #fff1e5; }}
+    .stack-table td {{ vertical-align: top; }}
+    .stack-text {{ font-family: Consolas, monospace; max-width: 1200px; white-space: normal; overflow-wrap: anywhere; }}
     .toolbar {{ display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }}
     .toolbar input {{ padding: 4px 6px; }}
-    .column-picker {{ display: inline-block; }}
-    .column-picker summary {{ cursor: pointer; }}
-    .column-picker-controls {{ display: grid; grid-template-columns: repeat(4, max-content); gap: 4px 12px; padding: 8px; border: 1px solid #d0d7de; background: #fff; position: absolute; z-index: 2; }}
+    .column-panel {{ border: 1px solid #d0d7de; background: #f6f8fa; padding: 8px; margin: 8px 0; }}
+    .column-panel > summary {{ cursor: pointer; font-weight: 600; }}
+    .column-panel[open] > summary {{ margin-bottom: 6px; }}
+    .column-picker-controls {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, max-content)); gap: 8px 18px; align-items: start; }}
+    .column-group {{ display: grid; gap: 3px; align-content: start; }}
+    .column-group-title {{ font-size: 12px; font-weight: 700; color: #57606a; text-transform: uppercase; }}
+    .column-group label {{ white-space: nowrap; }}
     details.report-section {{ margin-top: 24px; }}
     details.report-section > summary {{ cursor: pointer; font-size: 18px; font-weight: 600; }}
     details.report-section > table,
@@ -119,6 +123,13 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
     <tr><td>Callchain depth</td><td>{callchain_depth}</td></tr>
   </table>
   </details>
+  <details class="report-section" open>
+  <summary>Column Help</summary>
+  <table>
+    <tr><th>Column / Metric</th><th>Formula / Source</th><th>Meaning / Limitation</th></tr>
+    {column_help_rows}
+  </table>
+  </details>
   <details class="report-section">
     <summary>Quality</summary>
     <table>
@@ -143,14 +154,14 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
     <label>min samples <input id="minSamples" type="number" min="0" value="0" oninput="resetSourcePaging()"></label>
     <label>page size <input id="pageSize" type="number" min="1" max="10000" value="1000" onchange="resetSourcePaging()"></label>
     <button id="sourceWidthToggle" onclick="toggleSourceWidth()">Expand width</button>
-    <details class="column-picker">
-      <summary>Columns</summary>
-      <div id="sourceColumnPicker" class="column-picker-controls"></div>
-    </details>
     <button onclick="previousSourcePage()">Prev</button>
     <button onclick="nextSourcePage()">Next</button>
     <span id="sourcePageStatus"></span>
   </div>
+  <details class="column-panel">
+    <summary>Source Lines Columns</summary>
+    <div id="sourceColumnPicker" class="column-picker-controls"></div>
+  </details>
   <div class="table-scroll">
   <table id="sourceTable">
     <thead>
@@ -181,25 +192,23 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
     <tbody></tbody>
   </table>
   </details>
-  <details class="report-section">
-  <summary>Column Help</summary>
-  <table>
-    <tr><th>Column / Metric</th><th>Formula</th><th>Physical Meaning / Limitation</th></tr>
-    <tr><td><code>p %</code></td><td>line self weight / global self weight * 100</td><td>這一行本身 sample 權重佔整個 session 的比例。</td></tr>
-    <tr><td><code>acc_p %</code></td><td>line accumulated weight / global accumulated weight * 100</td><td>包含 callchain 歸因後，這一行在呼叫路徑上的累積比例。</td></tr>
-    <tr><td><code>file p %</code></td><td>line self weight / same-file self weight * 100</td><td>這一行在同檔案內的 self 熱度比例。</td></tr>
-    <tr><td><code>file acc_p %</code></td><td>line accumulated weight / same-file accumulated weight * 100</td><td>這一行在同檔案內的 callchain 累積比例。</td></tr>
-    <tr><td>Cycles</td><td>PMU cpu_cycles sample weight</td><td>CPU cycle 活動量；line-level 是 sampling attribution，不是每次 cycle 完整記錄。</td></tr>
-    <tr><td>instructions</td><td>PMU inst_retired sample weight</td><td>退休指令量；可搭配 cycles 算 CPI。</td></tr>
-    <tr><td>CPI</td><td>cpu_cycles / inst_retired</td><td>平均每退休一條指令消耗的 cycles；分母缺失或為 0 時不輸出 0。</td></tr>
-    <tr><td>MCPS</td><td>cpu_cycles / effective_time_seconds / 1000000</td><td>每秒百萬 CPU cycles；source line 層級是 sample 歸因後的近似活動量。</td></tr>
-    <tr><td>cache hit rate</td><td>(access - refill) / access</td><td>Cache hit rate 的統計近似；不是每一次 cache access 的完整 trace。</td></tr>
-    <tr><td>branch miss rate</td><td>branch_mispredict / branch_retired</td><td>分支預測錯誤比例的 sampling 近似。</td></tr>
-    <tr><td>SPE latency / data source</td><td>SPE normalized fields</td><td>來自 Arm SPE packet decode；欄位可因 CPU/kernel 缺失而 Missing。</td></tr>
-    <tr><td>Missing</td><td>capability unavailable</td><td>硬體、kernel 或 event-open 不支援，不能解讀成 0。</td></tr>
-    <tr><td>Unresolved</td><td>sample captured but no source attribution</td><td>sample 有 IP，但 build-id、DWARF 或 source root 解析失敗。</td></tr>
-    <tr><td>0</td><td>capability exists and attribution succeeded, no samples</td><td>資料存在且能歸因，只是這一行沒有該 metric sample。</td></tr>
+  <details class="report-section" open>
+  <summary>Callchain Frames</summary>
+  <div class="table-scroll">
+  <table class="stack-table">
+    <thead><tr><th>Role</th><th>Module</th><th>Function</th><th>IP</th><th>Relative</th><th>CPU</th><th>Thread</th><th>Samples</th><th>Self</th><th>Accumulated</th><th>p %</th><th>acc_p %</th><th>Status</th></tr></thead>
+    <tbody>{frame_rows}</tbody>
   </table>
+  </div>
+  </details>
+  <details class="report-section" open>
+  <summary>Callchains</summary>
+  <div class="table-scroll">
+  <table class="stack-table">
+    <thead><tr><th>Stack</th><th>Leaf</th><th>Root</th><th>CPU</th><th>Thread</th><th>Samples</th><th>Weight</th><th>p %</th></tr></thead>
+    <tbody>{callchain_rows}</tbody>
+  </table>
+  </div>
   </details>
   <details class="report-section">
   <summary>Artifacts</summary>
@@ -222,7 +231,7 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
     let activeFileRows = [];
     let activeSourceRows = [];
     const RAW_PMU_COLUMNS = {raw_pmu_columns_json};
-    const DERIVED_PMU_COLUMNS = ["cpi", "l1d_cache_hit_rate", "l2d_cache_hit_rate", "l3d_cache_hit_rate", "branch_miss_rate", "mpki", "mips", "mcps"];
+    const DERIVED_PMU_COLUMNS = {derived_pmu_columns_json};
     const SPE_COLUMNS = ["spe_sample_count", "spe_latency_cycles_avg", "spe_cache_hit_rate", "spe_branch_miss_rate", "spe_decode_errors"];
     const SOURCE_COLUMNS = [
       {{ key: "file", label: "File", cls: "col-file truncate", value: row => row.file }},
@@ -232,8 +241,6 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
       {{ key: "cpu", label: "CPU", cls: "col-cpu", value: row => row.cpu }},
       {{ key: "thread", label: "Thread", cls: "col-thread truncate", value: row => row.thread }},
       {{ key: "sample_count", label: "Samples", cls: "col-metric", value: row => row.sample_count, format: formatMetric }},
-      {{ key: "self_weight", label: "Self", cls: "col-metric", value: row => row.self_weight, format: formatMetric }},
-      {{ key: "accumulated_weight", label: "Acc", cls: "col-metric", value: row => row.accumulated_weight, format: formatMetric }},
       {{ key: "p_pct", label: "p %", cls: "col-metric", value: row => row.p_pct, format: formatPercent }},
       {{ key: "acc_p_pct", label: "acc %", cls: "col-metric", value: row => row.acc_p_pct, format: formatPercent }},
       {{ key: "file_p_pct", label: "file p %", cls: "col-wide-metric", value: row => row.file_p_pct, format: formatPercent }},
@@ -241,8 +248,15 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
       ...RAW_PMU_COLUMNS.map(key => ({{ key, label: key, cls: "col-wide-metric", value: row => metricValue(row, key) }})),
       ...DERIVED_PMU_COLUMNS.map(key => ({{ key, label: key, cls: "col-wide-metric", value: row => metricValue(row, key) }})),
       ...SPE_COLUMNS.map(key => ({{ key, label: key, cls: "col-wide-metric", value: row => metricValue(row, key) }})),
-      {{ key: "status", label: "Status", cls: "col-status truncate", value: row => row.status }},
       {{ key: "code", label: "Code", cls: "col-code truncate", value: row => row.code, code: true }},
+    ];
+    const SOURCE_COLUMN_GROUPS = [
+      {{ title: "Basic", keys: ["file", "line", "function", "module", "cpu", "thread", "sample_count"] }},
+      {{ title: "Percent", keys: ["p_pct", "acc_p_pct", "file_p_pct", "file_acc_p_pct"] }},
+      {{ title: "Recorded PMU", keys: RAW_PMU_COLUMNS }},
+      {{ title: "Derived PMU", keys: DERIVED_PMU_COLUMNS }},
+      {{ title: "Recorded SPE", keys: SPE_COLUMNS }},
+      {{ title: "Source", keys: ["code"] }},
     ];
     const DEFAULT_SOURCE_COLUMNS = {default_source_columns_json};
     let visibleSourceColumns = new Set(DEFAULT_SOURCE_COLUMNS);
@@ -306,7 +320,17 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
       renderSourceBody();
     }}
     function renderSourceColumnPicker() {{
-      document.getElementById("sourceColumnPicker").innerHTML = SOURCE_COLUMNS.map(column => `<label><input type="checkbox" onchange="toggleSourceColumn('${{column.key}}', this.checked)" ${{visibleSourceColumns.has(column.key) ? "checked" : ""}}> ${{escapeText(column.label)}}</label>`).join("");
+      const byKey = new Map(SOURCE_COLUMNS.map(column => [column.key, column]));
+      document.getElementById("sourceColumnPicker").innerHTML = SOURCE_COLUMN_GROUPS
+        .map(group => {{
+          const controls = group.keys
+            .map(key => byKey.get(key))
+            .filter(Boolean)
+            .map(column => `<label><input type="checkbox" onchange="toggleSourceColumn('${{column.key}}', this.checked)" ${{visibleSourceColumns.has(column.key) ? "checked" : ""}}> ${{escapeText(column.label)}}</label>`)
+            .join("");
+          return `<div class="column-group"><div class="column-group-title">${{escapeText(group.title)}}</div>${{controls}}</div>`;
+        }})
+        .join("");
     }}
     function renderSourceHeaders() {{
       document.getElementById("sourceHeaderRow").innerHTML = visibleSourceColumnList().map(column => `<th class="${{escapeText(column.cls || "col-metric")}}" data-source-sort="${{escapeText(column.key)}}" onclick="sortSourceRows('${{escapeText(column.key)}}')">${{escapeText(column.label)}} <span class="sort-indicator"></span></th>`).join("");
@@ -525,7 +549,9 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
         sample_period = manifest.capture_options.sample_period,
         callchain_depth = manifest.capture_options.callchain_depth,
         raw_pmu_columns_json = raw_pmu_columns_json,
+        derived_pmu_columns_json = derived_pmu_columns_json,
         default_source_columns_json = default_source_columns_json,
+        column_help_rows = column_help_rows(bundle, &raw_pmu_columns, &derived_pmu_columns),
         quality_rows = quality_rows(bundle),
         artifact_rows = manifest
             .artifacts
@@ -539,9 +565,187 @@ pub fn write_html_summary(bundle: &SourceProfileBundle, output: &Path) -> Result
                 escape_html(file.encoding.as_deref().unwrap_or(""))
             ))
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n"),
+        frame_rows = frame_rows_html(&model.frames),
+        callchain_rows = callchain_rows_html(&model.callchains)
     );
     fs::write(output, html).with_context(|| format!("Failed to write '{}'", output.display()))
+}
+
+fn column_help_rows(
+    bundle: &SourceProfileBundle,
+    raw_pmu_columns: &[String],
+    derived_pmu_columns: &[String],
+) -> String {
+    let mut rows = vec![
+        help_row("File", "source path", "歸因後的 source file。"),
+        help_row("Line", "source line number", "歸因後的 source line。"),
+        help_row(
+            "Function",
+            "symbolized function",
+            "sample 所在或歸因到的 function。",
+        ),
+        help_row("Module", "ELF / shared object", "sample 來源 module。"),
+        help_row("CPU", "PERF_SAMPLE_CPU", "此列 sample 覆蓋到的 CPU id。"),
+        help_row("Thread", "sample TID", "此列 sample 覆蓋到的 thread id。"),
+        help_row(
+            "Samples",
+            "line PMU sample count",
+            "此 source line 收到的 PMU sample 次數，可用來判斷熱點可信度。",
+        ),
+        help_row(
+            "p %",
+            "line self weight / global self weight * 100",
+            "全域 self 熱度比例；預設隱藏，可在 Columns 開啟。",
+        ),
+        help_row(
+            "acc %",
+            "line accumulated weight / global accumulated weight * 100",
+            "全域 callchain 累積比例；預設隱藏，可在 Columns 開啟。",
+        ),
+        help_row(
+            "file p %",
+            "line self weight / same-file self weight * 100",
+            "同檔案內 self 熱度比例；預設隱藏，可在 Columns 開啟。",
+        ),
+        help_row(
+            "file acc %",
+            "line accumulated weight / same-file accumulated weight * 100",
+            "同檔案內 callchain 累積比例；預設隱藏，可在 Columns 開啟。",
+        ),
+    ];
+
+    for key in raw_pmu_columns {
+        let event = bundle
+            .event_catalog
+            .events
+            .iter()
+            .find(|event| event.event_key == *key);
+        let source = event
+            .map(|event| format!("PMU event {} / {}", event.event_type, event.config))
+            .unwrap_or_else(|| "PMU event selected by MProfiler".to_string());
+        let meaning = event
+            .map(|event| {
+                format!(
+                    "{}；Source Lines 顯示該 event 在此列 sample 中的比例或 Missing/Undefined。",
+                    event.display_name
+                )
+            })
+            .unwrap_or_else(|| {
+                "MProfiler 選擇的 PMU event；Source Lines 顯示此列 sample 中的 event 比例或 Missing/Undefined。"
+                    .to_string()
+            });
+        rows.push(help_row(&format!("`{key}`"), &source, &meaning));
+    }
+
+    for key in derived_pmu_columns {
+        rows.push(match key.as_str() {
+            "cpi" => help_row(
+                "`cpi`",
+                "cpu_cycles / inst_retired",
+                "平均每退休一條指令消耗的 cycles；分母缺失或為 0 時為 Missing/Undefined。",
+            ),
+            "l1d_cache_hit_rate" => help_row(
+                "`l1d_cache_hit_rate`",
+                "(l1d_cache_access - l1d_cache_refill) / l1d_cache_access",
+                "L1D hit rate 的 sampling 近似。",
+            ),
+            "l2d_cache_hit_rate" => help_row(
+                "`l2d_cache_hit_rate`",
+                "(l2d_cache_access - l2d_cache_refill) / l2d_cache_access",
+                "L2D hit rate 的 sampling 近似。",
+            ),
+            "l3d_cache_hit_rate" => help_row(
+                "`l3d_cache_hit_rate`",
+                "(l3d_cache_access - l3d_cache_refill) / l3d_cache_access",
+                "L3D hit rate 的 sampling 近似。",
+            ),
+            "branch_miss_rate" => help_row(
+                "`branch_miss_rate`",
+                "branch_mispredict / branch_retired",
+                "分支預測錯誤比例的 sampling 近似。",
+            ),
+            "mpki" => help_row(
+                "`mpki`",
+                "l1d_cache_refill / inst_retired * 1000",
+                "每千指令 L1D refill sampling 近似。",
+            ),
+            "mips" => help_row(
+                "`mips`",
+                "inst_retired / effective_time_seconds / 1,000,000",
+                "每秒百萬退休指令，source line 層級是 sample 歸因後的近似活動量。",
+            ),
+            "mcps" => help_row(
+                "`mcps`",
+                "cpu_cycles / effective_time_seconds / 1,000,000",
+                "每秒百萬 CPU cycles，source line 層級是 sample 歸因後的近似活動量。",
+            ),
+            _ => help_row(
+                &format!("`{key}`"),
+                "derived PMU metric",
+                "由 MProfiler 選擇的 PMU events 推導。",
+            ),
+        });
+    }
+
+    for key in SPE_COLUMNS {
+        rows.push(match *key {
+            "spe_sample_count" => help_row(
+                "`spe_sample_count`",
+                "decoded SPE sample count",
+                "此列歸因到的 SPE sample 數。",
+            ),
+            "spe_latency_cycles_avg" => help_row(
+                "`spe_latency_cycles_avg`",
+                "SPE latency cycles sum / count",
+                "SPE 記錄的平均 latency cycles；缺 field 時為 Missing。",
+            ),
+            "spe_cache_hit_rate" => help_row(
+                "`spe_cache_hit_rate`",
+                "SPE cache hit / cache total",
+                "SPE packet decode 後的 cache hit rate。",
+            ),
+            "spe_branch_miss_rate" => help_row(
+                "`spe_branch_miss_rate`",
+                "SPE branch miss / branch total",
+                "SPE packet decode 後的 branch miss rate。",
+            ),
+            "spe_decode_errors" => help_row(
+                "`spe_decode_errors`",
+                "SPE decode error count",
+                "SPE packet decode 失敗數。",
+            ),
+            _ => help_row(
+                &format!("`{key}`"),
+                "SPE metric",
+                "Arm SPE decoded metric。",
+            ),
+        });
+    }
+
+    rows.push(help_row(
+        "Code",
+        "source text",
+        "該 source line 的原始碼內容。",
+    ));
+    rows.join("\n")
+}
+
+fn help_row(column: &str, formula: &str, meaning: &str) -> String {
+    format!(
+        "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+        escape_help_cell(column),
+        escape_html(formula),
+        escape_html(meaning)
+    )
+}
+
+fn escape_help_cell(text: &str) -> String {
+    if text.starts_with('`') && text.ends_with('`') && text.len() >= 2 {
+        format!("<code>{}</code>", escape_html(&text[1..text.len() - 1]))
+    } else {
+        escape_html(text)
+    }
 }
 
 fn quality_rows(bundle: &SourceProfileBundle) -> String {
@@ -636,6 +840,57 @@ fn lane_text(enabled: bool, available: bool) -> &'static str {
     }
 }
 
+fn frame_rows_html(rows: &[super::report_model::ReportFrameRow]) -> String {
+    if rows.is_empty() {
+        return "<tr><td colspan=\"13\">No callchain frames</td></tr>".to_string();
+    }
+    rows.iter()
+        .take(200)
+        .map(|row| {
+            format!(
+                "<tr><td>{}</td><td>{}</td><td class=\"stack-text\">{}</td><td><code>0x{:x}</code></td><td><code>0x{:x}</code></td><td>{}</td><td>{}</td><td>{}</td><td>{:.0}</td><td>{:.0}</td><td>{:.3}</td><td>{:.3}</td><td>{}</td></tr>",
+                escape_html(&row.role),
+                escape_html(&row.module),
+                escape_html(&row.function),
+                row.ip,
+                row.relative_address,
+                escape_html(&row.cpu),
+                escape_html(&row.thread),
+                row.sample_count,
+                row.self_weight,
+                row.accumulated_weight,
+                row.p_pct,
+                row.acc_p_pct,
+                escape_html(&row.status)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn callchain_rows_html(rows: &[super::report_model::ReportCallchainRow]) -> String {
+    if rows.is_empty() {
+        return "<tr><td colspan=\"8\">No callchains</td></tr>".to_string();
+    }
+    rows.iter()
+        .take(200)
+        .map(|row| {
+            format!(
+                "<tr><td class=\"stack-text\">{}</td><td class=\"stack-text\">{}</td><td class=\"stack-text\">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.0}</td><td>{:.3}</td></tr>",
+                escape_html(&row.stack),
+                escape_html(&row.leaf),
+                escape_html(&row.root),
+                escape_html(&row.cpu),
+                escape_html(&row.thread),
+                row.sample_count,
+                row.weight,
+                row.p_pct
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -663,12 +918,33 @@ mod tests {
             .unwrap()
             + default_columns_start;
         let default_columns = &html[default_columns_start..default_columns_end];
+        let source_columns_start = html.find("const SOURCE_COLUMNS = ").unwrap();
+        let source_columns_end = html[source_columns_start..]
+            .find(";\n    const DEFAULT_SOURCE_COLUMNS")
+            .unwrap()
+            + source_columns_start;
+        let source_columns = &html[source_columns_start..source_columns_end];
         assert!(html.contains("SourceLine Report"));
         assert!(html.contains("fixture-minimal-001"));
         assert!(html.contains("PMU buffer pages"));
         assert!(
             html.contains("<details class=\"report-section\" open>\n  <summary>Summary</summary>")
         );
+        let summary_pos = html.find("<summary>Summary</summary>").unwrap();
+        let column_help_pos = html.find("<summary>Column Help</summary>").unwrap();
+        let source_lines_pos = html.find("<summary>Source Lines</summary>").unwrap();
+        assert!(summary_pos < column_help_pos);
+        assert!(column_help_pos < source_lines_pos);
+        assert!(html
+            .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
+        assert!(html.contains("Formula / Source"));
+        assert!(html.contains("line PMU sample count"));
+        assert!(html.contains("<code>cpu_cycles</code>"));
+        assert!(html.contains("<code>inst_retired</code>"));
+        assert!(html.contains("<code>cpi</code>"));
+        assert!(html.contains("<code>mips</code>"));
+        assert!(html.contains("<code>spe_sample_count</code>"));
+        assert!(html.contains("source text"));
         assert!(html.contains("Quality"));
         assert!(html.contains("<details class=\"report-section\">\n    <summary>Quality</summary>"));
         assert!(html.contains("SPE capability"));
@@ -678,7 +954,7 @@ mod tests {
             "<details class=\"report-section\" open>\n  <summary>Source Lines</summary>"
         ));
         assert!(html.contains("Columns"));
-        assert!(html.contains("MCPS"));
+        assert!(html.contains("<code>mcps</code>"));
         assert!(html.contains("col-file"));
         assert!(html.contains("col-function"));
         assert!(html.contains("table-scroll"));
@@ -687,6 +963,10 @@ mod tests {
         assert!(html.contains("sourceWidthToggle"));
         assert!(html.contains("toggleSourceWidth"));
         assert!(html.contains("#sourceTable.expanded"));
+        assert!(html.contains(
+            "<details class=\"column-panel\">\n    <summary>Source Lines Columns</summary>"
+        ));
+        assert!(!html.contains("<details class=\"column-panel\" open>"));
         assert!(html.contains("id=\"sourceColumnPicker\""));
         assert!(html.contains("id=\"minSamples\""));
         assert!(html.contains("id=\"minSamples\" type=\"number\" min=\"0\" value=\"0\" oninput=\"resetSourcePaging()\""));
@@ -700,13 +980,17 @@ mod tests {
         assert!(html.contains("renderSourceBody"));
         assert!(html.contains("sample_count"));
         assert!(html.contains("Samples"));
+        assert!(!source_columns.contains("key: \"self_weight\""));
+        assert!(!source_columns.contains("key: \"accumulated_weight\""));
+        assert!(!source_columns.contains("key: \"status\""));
         assert!(!default_columns.contains("\"p_pct\""));
         assert!(!default_columns.contains("\"acc_p_pct\""));
         assert!(!default_columns.contains("\"file_p_pct\""));
         assert!(!default_columns.contains("\"file_acc_p_pct\""));
         assert!(!default_columns.contains("\"status\""));
         assert!(html.contains("cpu_cycles"));
-        assert!(html.contains("stall_backend"));
+        assert!(html.contains("inst_retired"));
+        assert!(!html.contains("stall_backend"));
         assert!(html.contains("spe_sample_count"));
         assert!(html.contains("class=\"sort-indicator\""));
         assert!(html.contains("updateSourceSortIndicators"));
@@ -724,10 +1008,6 @@ mod tests {
         assert!(html.contains("updateFileSortIndicators"));
         assert!(html.contains("Functions"));
         assert!(html.contains("<details class=\"report-section\">\n  <summary>Functions</summary>"));
-        assert!(html.contains("Column Help"));
-        assert!(
-            html.contains("<details class=\"report-section\">\n  <summary>Column Help</summary>")
-        );
         assert!(html.contains("<details class=\"report-section\">\n  <summary>Artifacts</summary>"));
         assert!(html.contains("Missing"));
         assert!(html.contains("/api/source-lines"));

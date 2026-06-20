@@ -1,9 +1,11 @@
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use object::{Object, ObjectSymbol, SymbolKind};
 
 use super::bundle::SourceProfileBundle;
 use super::line_resolver::{
@@ -13,7 +15,7 @@ use super::metrics::{
     aggregate_pmu_file, aggregate_spe_by_address, compute_percentages, derive_pmu_metrics,
     MetricValue, PmuAddressAggregate, SpeAddressAggregate,
 };
-use super::sample_stream::read_spe_samples;
+use super::sample_stream::{for_each_pmu_sample, read_spe_samples, PmuSample};
 use super::source_loader::load_source_file;
 use super::symbol_resolver::{discover_debug_elfs, match_debug_elfs, ElfMatchQuality};
 
@@ -55,18 +57,11 @@ pub const SPE_COLUMNS: &[&str] = &[
 
 pub fn pmu_raw_column_keys(bundle: &SourceProfileBundle) -> Vec<String> {
     let requested = &bundle.manifest.capture_options.requested_event_keys;
-    let selected = if requested.is_empty() {
-        RAW_PMU_COLUMNS
-            .iter()
-            .map(|key| (*key).to_string())
-            .collect::<BTreeSet<_>>()
-    } else {
-        requested.iter().cloned().collect::<BTreeSet<_>>()
-    };
+    let selected = requested.iter().cloned().collect::<BTreeSet<_>>();
 
     let mut keys = Vec::new();
     for event in &bundle.event_catalog.events {
-        if selected.contains(&event.event_key) {
+        if (selected.is_empty() && event.source == "pmu") || selected.contains(&event.event_key) {
             keys.push(event.event_key.clone());
         }
     }
@@ -75,12 +70,48 @@ pub fn pmu_raw_column_keys(bundle: &SourceProfileBundle) -> Vec<String> {
             keys.push(key);
         }
     }
+    if keys.is_empty() {
+        keys.extend(RAW_PMU_COLUMNS.iter().map(|key| (*key).to_string()));
+    }
     keys
 }
 
 pub fn pmu_column_keys(bundle: &SourceProfileBundle) -> Vec<String> {
     let mut keys = pmu_raw_column_keys(bundle);
-    keys.extend(DERIVED_PMU_COLUMNS.iter().map(|key| (*key).to_string()));
+    keys.extend(pmu_derived_column_keys(bundle));
+    keys
+}
+
+pub fn pmu_derived_column_keys(bundle: &SourceProfileBundle) -> Vec<String> {
+    let raw = pmu_raw_column_keys(bundle)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let has = |key: &str| raw.contains(key);
+    let mut keys = Vec::new();
+    if has("cpu_cycles") && has("inst_retired") {
+        keys.push("cpi".to_string());
+    }
+    if has("l1d_cache_access") && has("l1d_cache_refill") {
+        keys.push("l1d_cache_hit_rate".to_string());
+    }
+    if has("l2d_cache_access") && has("l2d_cache_refill") {
+        keys.push("l2d_cache_hit_rate".to_string());
+    }
+    if has("l3d_cache_access") && has("l3d_cache_refill") {
+        keys.push("l3d_cache_hit_rate".to_string());
+    }
+    if has("branch_mispredict") && has("branch_retired") {
+        keys.push("branch_miss_rate".to_string());
+    }
+    if has("l1d_cache_refill") && has("inst_retired") {
+        keys.push("mpki".to_string());
+    }
+    if has("inst_retired") {
+        keys.push("mips".to_string());
+    }
+    if has("cpu_cycles") {
+        keys.push("mcps".to_string());
+    }
     keys
 }
 
@@ -89,6 +120,8 @@ pub struct ReportModel {
     pub rows: Vec<ReportLineRow>,
     pub files: Vec<ReportFileRow>,
     pub functions: Vec<ReportFunctionRow>,
+    pub frames: Vec<ReportFrameRow>,
+    pub callchains: Vec<ReportCallchainRow>,
     pub warnings: Vec<String>,
 }
 
@@ -137,6 +170,38 @@ pub struct ReportFunctionRow {
     pub accumulated_weight: f64,
     pub sample_count: u64,
     pub hot_lines: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportFrameRow {
+    pub role: String,
+    pub module: String,
+    pub function: String,
+    pub ip: u64,
+    pub relative_address: u64,
+    pub mapping_id: u64,
+    pub cpu: String,
+    pub thread: String,
+    pub sample_count: u64,
+    pub self_weight: f64,
+    pub accumulated_weight: f64,
+    pub p_pct: f64,
+    pub acc_p_pct: f64,
+    pub event_weights: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReportCallchainRow {
+    pub stack: String,
+    pub leaf: String,
+    pub root: String,
+    pub cpu: String,
+    pub thread: String,
+    pub sample_count: u64,
+    pub weight: f64,
+    pub p_pct: f64,
+    pub event_weights: String,
 }
 
 #[derive(Debug, Clone)]
@@ -221,13 +286,31 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     let elf_matches = load_elf_matches(bundle)?;
     let mut warnings = collect_quality_warnings(bundle);
     let mut line_resolver = CachedElfLineResolver::default();
+    let mut frames = Vec::new();
+    let mut callchains = Vec::new();
     for matched in elf_matches.values() {
         if matched.quality == ElfMatchQuality::Missing && should_warn_missing_debug_elf(matched) {
             warnings.push(format!("Debug ELF Missing for {}", matched.module_id));
+        } else if matched.quality != ElfMatchQuality::Missing
+            && should_warn_missing_debug_elf(matched)
+            && !matched.has_dwarf_debug_info
+        {
+            let candidate = matched
+                .candidate_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            warnings.push(format!(
+                "Debug ELF for {} matched {}, but it has no DWARF .debug_line/.debug_info sections. Source Lines cannot be generated from this stripped ELF; use an unstripped device library or enable local program analysis with an unstripped ELF.",
+                matched.module_id, candidate
+            ));
         }
     }
 
     if let Some(path) = &bundle.pmu_samples_path {
+        let stack_report = build_pmu_stack_fallback(bundle, path, &elf_matches)?;
+        frames = stack_report.0;
+        callchains = stack_report.1;
         let aggregate_result = aggregate_pmu_file(path, &bundle.event_catalog)?;
         append_cpu_coverage_diagnostic(
             bundle,
@@ -320,6 +403,8 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         rows: line_rows,
         files,
         functions,
+        frames,
+        callchains,
         warnings,
     })
 }
@@ -450,6 +535,356 @@ fn resolve_key(
         location.function.unwrap_or_default(),
         mapping.module_id.clone(),
     )))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct FrameKey {
+    role: String,
+    module: String,
+    function: String,
+    ip: u64,
+    relative_address: u64,
+    mapping_id: u64,
+}
+
+#[derive(Debug, Default)]
+struct MutableFrameRow {
+    cpus: BTreeSet<u32>,
+    tids: BTreeSet<u32>,
+    sample_count: u64,
+    self_weight: u64,
+    accumulated_weight: u64,
+    event_weights: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Default)]
+struct MutableCallchainRow {
+    leaf: String,
+    root: String,
+    cpus: BTreeSet<u32>,
+    tids: BTreeSet<u32>,
+    sample_count: u64,
+    weight: u64,
+    event_weights: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct NamedAddress {
+    mapping_id: u64,
+    module: String,
+    function: String,
+    ip: u64,
+    relative_address: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ElfSymbolName {
+    address: u64,
+    size: u64,
+    name: String,
+}
+
+#[derive(Default)]
+struct SymbolNameCache {
+    by_module: BTreeMap<String, Vec<ElfSymbolName>>,
+}
+
+impl SymbolNameCache {
+    fn from_matches(matches: &BTreeMap<String, super::symbol_resolver::ElfMatch>) -> Result<Self> {
+        let mut cache = Self::default();
+        for matched in matches.values() {
+            let Some(path) = matched.candidate_path.as_deref() else {
+                continue;
+            };
+            let bytes = fs::read(path)
+                .with_context(|| format!("Failed to read ELF symbols from '{}'", path.display()))?;
+            let object = object::File::parse(&*bytes)
+                .with_context(|| format!("Failed to parse ELF '{}'", path.display()))?;
+            let mut symbols = Vec::new();
+            collect_object_symbols(&object, &mut symbols);
+            symbols.sort_by(|a, b| a.address.cmp(&b.address).then_with(|| b.size.cmp(&a.size)));
+            symbols.dedup_by(|a, b| a.address == b.address && a.name == b.name);
+            cache.by_module.insert(matched.module_id.clone(), symbols);
+        }
+        Ok(cache)
+    }
+
+    fn resolve(&self, module: &str, relative_address: u64) -> String {
+        let Some(symbols) = self.by_module.get(module) else {
+            return String::new();
+        };
+        let mut low = 0_usize;
+        let mut high = symbols.len();
+        while low < high {
+            let mid = (low + high) / 2;
+            if symbols[mid].address <= relative_address {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        if low == 0 {
+            return String::new();
+        }
+        let symbol = &symbols[low - 1];
+        if symbol.size == 0 || relative_address < symbol.address.saturating_add(symbol.size) {
+            symbol.name.clone()
+        } else {
+            String::new()
+        }
+    }
+}
+
+fn collect_object_symbols(object: &object::File<'_>, out: &mut Vec<ElfSymbolName>) {
+    for symbol in object.symbols() {
+        push_object_symbol(symbol, out);
+    }
+    for symbol in object.dynamic_symbols() {
+        push_object_symbol(symbol, out);
+    }
+}
+
+fn push_object_symbol(symbol: object::Symbol<'_, '_>, out: &mut Vec<ElfSymbolName>) {
+    if symbol.kind() != SymbolKind::Text || symbol.address() == 0 {
+        return;
+    }
+    let Ok(name) = symbol.name() else {
+        return;
+    };
+    if name.is_empty() {
+        return;
+    }
+    out.push(ElfSymbolName {
+        address: symbol.address(),
+        size: symbol.size(),
+        name: demangle_symbol_name(name),
+    });
+}
+
+fn demangle_symbol_name(name: &str) -> String {
+    let Ok(symbol) = cpp_demangle::Symbol::new(name) else {
+        return name.to_string();
+    };
+    symbol
+        .demangle(&cpp_demangle::DemangleOptions::default())
+        .unwrap_or_else(|_| name.to_string())
+}
+
+fn build_pmu_stack_fallback(
+    bundle: &SourceProfileBundle,
+    path: &Path,
+    elf_matches: &BTreeMap<String, super::symbol_resolver::ElfMatch>,
+) -> Result<(Vec<ReportFrameRow>, Vec<ReportCallchainRow>)> {
+    let symbols = SymbolNameCache::from_matches(elf_matches)?;
+    let mut frames = BTreeMap::<FrameKey, MutableFrameRow>::new();
+    let mut callchains = BTreeMap::<String, MutableCallchainRow>::new();
+
+    for_each_pmu_sample(path, |sample| {
+        aggregate_stack_sample(bundle, &symbols, &mut frames, &mut callchains, &sample);
+        Ok(())
+    })?;
+
+    let total_self = frames.values().map(|row| row.self_weight).sum::<u64>() as f64;
+    let total_acc = frames
+        .values()
+        .map(|row| row.accumulated_weight)
+        .sum::<u64>() as f64;
+    let mut frame_rows = frames
+        .into_iter()
+        .map(|(key, row)| {
+            let status = if key.function.is_empty() {
+                "UnresolvedSymbol".to_string()
+            } else {
+                "Symbol".to_string()
+            };
+            ReportFrameRow {
+                role: key.role,
+                module: key.module,
+                function: key.function,
+                ip: key.ip,
+                relative_address: key.relative_address,
+                mapping_id: key.mapping_id,
+                cpu: join_u32s(&row.cpus),
+                thread: join_u32s(&row.tids),
+                sample_count: row.sample_count,
+                self_weight: row.self_weight as f64,
+                accumulated_weight: row.accumulated_weight as f64,
+                p_pct: percent(row.self_weight as f64, total_self),
+                acc_p_pct: percent(row.accumulated_weight as f64, total_acc),
+                event_weights: event_weights_text(&row.event_weights),
+                status,
+            }
+        })
+        .collect::<Vec<_>>();
+    frame_rows.sort_by(|a, b| {
+        b.self_weight
+            .partial_cmp(&a.self_weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.accumulated_weight
+                    .partial_cmp(&a.accumulated_weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    let total_callchain = callchains.values().map(|row| row.weight).sum::<u64>() as f64;
+    let mut callchain_rows = callchains
+        .into_iter()
+        .map(|(stack, row)| ReportCallchainRow {
+            stack,
+            leaf: row.leaf,
+            root: row.root,
+            cpu: join_u32s(&row.cpus),
+            thread: join_u32s(&row.tids),
+            sample_count: row.sample_count,
+            weight: row.weight as f64,
+            p_pct: percent(row.weight as f64, total_callchain),
+            event_weights: event_weights_text(&row.event_weights),
+        })
+        .collect::<Vec<_>>();
+    callchain_rows.sort_by(|a, b| {
+        b.weight
+            .partial_cmp(&a.weight)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    Ok((frame_rows, callchain_rows))
+}
+
+fn aggregate_stack_sample(
+    bundle: &SourceProfileBundle,
+    symbols: &SymbolNameCache,
+    frames: &mut BTreeMap<FrameKey, MutableFrameRow>,
+    callchains: &mut BTreeMap<String, MutableCallchainRow>,
+    sample: &PmuSample,
+) {
+    let event_key = bundle
+        .event_catalog
+        .events
+        .get(sample.event_key_ref as usize)
+        .map(|event| event.event_key.as_str())
+        .unwrap_or("unknown_event")
+        .to_string();
+    let leaf = describe_runtime_ip(bundle, symbols, sample.ip);
+    add_frame_row(
+        frames,
+        "self",
+        &leaf,
+        sample,
+        &event_key,
+        sample.period_or_weight,
+        0,
+    );
+
+    let mut stack = Vec::with_capacity(sample.callchain_ips.len() + 1);
+    stack.push(frame_label(&leaf));
+    for ip in &sample.callchain_ips {
+        let frame = describe_runtime_ip(bundle, symbols, *ip);
+        add_frame_row(
+            frames,
+            "callchain",
+            &frame,
+            sample,
+            &event_key,
+            0,
+            sample.period_or_weight,
+        );
+        stack.push(frame_label(&frame));
+    }
+
+    let stack_text = stack.join(" <- ");
+    let row = callchains.entry(stack_text).or_default();
+    if row.leaf.is_empty() {
+        row.leaf = stack.first().cloned().unwrap_or_default();
+        row.root = stack.last().cloned().unwrap_or_default();
+    }
+    row.cpus.insert(sample.cpu);
+    row.tids.insert(sample.tid);
+    row.sample_count += 1;
+    row.weight += sample.period_or_weight;
+    *row.event_weights.entry(event_key).or_default() += sample.period_or_weight;
+}
+
+fn add_frame_row(
+    frames: &mut BTreeMap<FrameKey, MutableFrameRow>,
+    role: &str,
+    frame: &NamedAddress,
+    sample: &PmuSample,
+    event_key: &str,
+    self_weight: u64,
+    accumulated_weight: u64,
+) {
+    let key = FrameKey {
+        role: role.to_string(),
+        module: frame.module.clone(),
+        function: frame.function.clone(),
+        ip: frame.ip,
+        relative_address: frame.relative_address,
+        mapping_id: frame.mapping_id,
+    };
+    let row = frames.entry(key).or_default();
+    row.cpus.insert(sample.cpu);
+    row.tids.insert(sample.tid);
+    row.sample_count += 1;
+    row.self_weight += self_weight;
+    row.accumulated_weight += accumulated_weight;
+    *row.event_weights.entry(event_key.to_string()).or_default() +=
+        self_weight.saturating_add(accumulated_weight);
+}
+
+fn describe_runtime_ip(
+    bundle: &SourceProfileBundle,
+    symbols: &SymbolNameCache,
+    ip: u64,
+) -> NamedAddress {
+    if let Some(relative) = runtime_address_to_relative(&bundle.maps.maps, ip) {
+        return NamedAddress {
+            mapping_id: relative.mapping_id,
+            function: symbols.resolve(&relative.module_id, relative.relative_address),
+            module: relative.module_id,
+            ip,
+            relative_address: relative.relative_address,
+        };
+    }
+    NamedAddress {
+        mapping_id: 0,
+        module: "<unknown>".to_string(),
+        function: String::new(),
+        ip,
+        relative_address: ip,
+    }
+}
+
+fn frame_label(frame: &NamedAddress) -> String {
+    if frame.function.is_empty() {
+        format!("{}+0x{:x}", frame.module, frame.relative_address)
+    } else {
+        format!("{} ({})", frame.function, frame.module)
+    }
+}
+
+fn join_u32s(values: &BTreeSet<u32>) -> String {
+    values
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn event_weights_text(values: &BTreeMap<String, u64>) -> String {
+    values
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn percent(value: f64, denominator: f64) -> f64 {
+    if denominator > 0.0 {
+        value / denominator * 100.0
+    } else {
+        0.0
+    }
 }
 
 fn merge_pmu(row: &mut MutableLineRow, aggregate: PmuAddressAggregate) {
@@ -1187,6 +1622,40 @@ mod tests {
     }
 
     #[test]
+    fn pmu_columns_default_to_catalog_events_not_fixed_list() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        bundle.manifest.capture_options.requested_event_keys.clear();
+        bundle
+            .event_catalog
+            .events
+            .retain(|event| event.event_key != "branch_mispredict");
+
+        let keys = pmu_raw_column_keys(&bundle);
+
+        assert!(!keys.contains(&"branch_mispredict".to_string()));
+        assert!(keys.iter().all(|key| bundle
+            .event_catalog
+            .events
+            .iter()
+            .any(|event| event.event_key == *key)));
+    }
+
+    #[test]
+    fn derived_pmu_columns_follow_requested_raw_events() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        bundle.manifest.capture_options.requested_event_keys =
+            vec!["cpu_cycles".to_string(), "stall_backend".to_string()];
+
+        let keys = pmu_derived_column_keys(&bundle);
+
+        assert_eq!(keys, vec!["mcps".to_string()]);
+    }
+
+    #[test]
     fn supported_zero_pmu_events_do_not_make_derived_metrics_missing() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
@@ -1302,6 +1771,7 @@ mod tests {
             candidate_path: None,
             quality: ElfMatchQuality::Missing,
             reason: "missing".to_string(),
+            has_dwarf_debug_info: false,
         };
         let app_match = crate::source_profile::symbol_resolver::ElfMatch {
             module_id: "libUE4.so".to_string(),
@@ -1309,6 +1779,7 @@ mod tests {
             candidate_path: None,
             quality: ElfMatchQuality::Missing,
             reason: "missing".to_string(),
+            has_dwarf_debug_info: false,
         };
         let pseudo_match = crate::source_profile::symbol_resolver::ElfMatch {
             module_id: "memfd:jit-cache (deleted)".to_string(),
@@ -1316,6 +1787,7 @@ mod tests {
             candidate_path: None,
             quality: ElfMatchQuality::Missing,
             reason: "missing".to_string(),
+            has_dwarf_debug_info: false,
         };
 
         assert!(!should_warn_missing_debug_elf(&os_match));

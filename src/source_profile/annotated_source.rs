@@ -28,6 +28,7 @@ struct AnnotatedSourceFile {
     original_path: String,
     annotated_path: String,
     sampled_lines: usize,
+    total_lines: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,15 +47,18 @@ pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) 
     let formatter = discover_mprofiler_astyle();
     let mut by_file = BTreeMap::<PathBuf, BTreeMap<u32, String>>::new();
 
-    for row in model
-        .rows
-        .iter()
-        .filter(|row| row.status.contains("NonZero"))
-    {
-        by_file.entry(PathBuf::from(&row.file)).or_default().insert(
-            row.line,
-            format_annotation(row, &pmu_columns, bundle.manifest.lanes.spe.available),
-        );
+    for row in &model.rows {
+        let file = PathBuf::from(&row.file);
+        if !is_within_source_roots(&file, &roots) {
+            continue;
+        }
+        let annotations = by_file.entry(file).or_default();
+        if row.status.contains("NonZero") {
+            annotations.insert(
+                row.line,
+                format_annotation(row, &pmu_columns, bundle.manifest.lanes.spe.available),
+            );
+        }
     }
 
     let mut manifest_files = Vec::new();
@@ -98,6 +102,22 @@ pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) 
     })
 }
 
+fn is_within_source_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    let normalized = normalize_for_prefix_check(path);
+    roots.iter().any(|root| {
+        let root = normalize_for_prefix_check(root);
+        normalized.starts_with(root)
+    })
+}
+
+fn normalize_for_prefix_check(path: &Path) -> PathBuf {
+    let trimmed = path
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    fs::canonicalize(&trimmed).unwrap_or_else(|_| PathBuf::from(trimmed))
+}
+
 #[cfg(test)]
 fn write_annotated_file(
     source_file: &Path,
@@ -131,6 +151,7 @@ fn write_annotated_file_with_formatter(
             .with_context(|| format!("Failed to create '{}'", parent.display()))?;
     }
     let lines = load_source_file(source_file)?;
+    let total_lines = lines.len();
     let mut out = String::new();
     for line in lines {
         if let Some(annotation) = annotations.get(&line.line_number) {
@@ -150,6 +171,7 @@ fn write_annotated_file_with_formatter(
         original_path: source_file.to_string_lossy().to_string(),
         annotated_path: output_path.to_string_lossy().to_string(),
         sampled_lines: annotations.len(),
+        total_lines,
     }))
 }
 
@@ -429,7 +451,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writes_annotated_source_for_sampled_lines_only() {
+    fn writes_full_source_files_with_sample_annotations() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
             SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
@@ -445,8 +467,9 @@ mod tests {
         assert!(text.contains("acc_p="));
         assert!(text.contains("file_p="));
         assert!(text.contains("cpu_cycles="));
+        assert!(text.contains("inst_retired="));
         assert!(text.contains("cpi="));
-        assert!(text.contains("l1d_cache_hit_rate="));
+        assert!(!text.contains("l1d_cache_hit_rate="));
         assert!(text.contains("sum += values[i] * 3;"));
         assert!(out.join("manifest.json").exists());
     }

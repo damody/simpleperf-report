@@ -6,6 +6,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use serde::Serialize;
 
 use super::bundle::SourceProfileBundle;
@@ -69,27 +71,46 @@ pub fn write_annotated_sources_from_model(
         }
     }
 
+    let entries = by_file
+        .into_iter()
+        .filter(|(_, annotations)| !annotations.is_empty())
+        .collect::<Vec<_>>();
+    let worker_count = annotated_source_worker_count(entries.len());
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .build()
+        .context("Failed to create annotated source worker pool")?;
+    let results = pool.install(|| {
+        entries
+            .par_iter()
+            .map(|(source_file, annotations)| {
+                match write_annotated_file_with_formatter(
+                    source_file,
+                    annotations,
+                    &roots,
+                    output_dir,
+                    formatter.as_ref(),
+                )? {
+                    Some(file) => Ok(AnnotatedWriteResult::Written(file)),
+                    None => Ok(AnnotatedWriteResult::Skipped(SkippedAnnotatedSourceFile {
+                        original_path: source_file.to_string_lossy().to_string(),
+                        sampled_lines: annotations.len(),
+                        reason: "source file does not exist on this host".to_string(),
+                    })),
+                }
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+
     let mut manifest_files = Vec::new();
     let mut skipped_files = Vec::new();
-    for (source_file, annotations) in by_file {
-        if annotations.is_empty() {
-            continue;
-        }
-        match write_annotated_file_with_formatter(
-            &source_file,
-            &annotations,
-            &roots,
-            output_dir,
-            formatter.as_ref(),
-        )? {
-            Some(file) => manifest_files.push(file),
-            None => skipped_files.push(SkippedAnnotatedSourceFile {
-                original_path: source_file.to_string_lossy().to_string(),
-                sampled_lines: annotations.len(),
-                reason: "source file does not exist on this host".to_string(),
-            }),
+    for result in results {
+        match result {
+            AnnotatedWriteResult::Written(file) => manifest_files.push(file),
+            AnnotatedWriteResult::Skipped(file) => skipped_files.push(file),
         }
     }
+    sort_manifest_entries(&mut manifest_files, &mut skipped_files);
 
     let manifest = AnnotatedSourceManifest {
         session_id: bundle.manifest.session_id.clone(),
@@ -108,6 +129,30 @@ pub fn write_annotated_sources_from_model(
             output_dir.display()
         )
     })
+}
+
+enum AnnotatedWriteResult {
+    Written(AnnotatedSourceFile),
+    Skipped(SkippedAnnotatedSourceFile),
+}
+
+fn sort_manifest_entries(
+    files: &mut [AnnotatedSourceFile],
+    skipped_files: &mut [SkippedAnnotatedSourceFile],
+) {
+    files.sort_by(|a, b| {
+        a.original_path
+            .cmp(&b.original_path)
+            .then_with(|| a.annotated_path.cmp(&b.annotated_path))
+    });
+    skipped_files.sort_by(|a, b| a.original_path.cmp(&b.original_path));
+}
+
+fn annotated_source_worker_count(entry_count: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    entry_count.max(1).min(available).min(4)
 }
 
 fn is_within_source_roots(path: &Path, roots: &[PathBuf]) -> bool {
@@ -480,6 +525,69 @@ mod tests {
         assert!(!text.contains("l1d_cache_hit_rate="));
         assert!(text.contains("sum += values[i] * 3;"));
         assert!(out.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn writes_annotated_sources_from_prebuilt_model() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = crate::source_profile::report_model::build_report_model(&bundle).unwrap();
+        let out = root.join("target/source_profile_tests/annotated_source_from_model");
+        let _ = fs::remove_dir_all(&out);
+
+        write_annotated_sources_from_model(&bundle, &model, &out).unwrap();
+
+        let manifest = fs::read_to_string(out.join("manifest.json")).unwrap();
+        assert!(manifest.contains("fixture.cpp"));
+        let annotated = out.join("fixture.cpp");
+        let text = fs::read_to_string(&annotated).unwrap();
+        assert!(text.contains("// [MProfiler]"));
+        assert!(text.contains("sum += values[i] * 3;"));
+    }
+
+    #[test]
+    fn annotated_manifest_entries_are_sorted() {
+        let mut files = vec![
+            AnnotatedSourceFile {
+                original_path: "z.cpp".to_string(),
+                annotated_path: "out/z.cpp".to_string(),
+                sampled_lines: 1,
+                total_lines: 10,
+            },
+            AnnotatedSourceFile {
+                original_path: "a.cpp".to_string(),
+                annotated_path: "out/a.cpp".to_string(),
+                sampled_lines: 1,
+                total_lines: 10,
+            },
+        ];
+        let mut skipped_files = vec![
+            SkippedAnnotatedSourceFile {
+                original_path: "z_missing.cpp".to_string(),
+                sampled_lines: 1,
+                reason: "missing".to_string(),
+            },
+            SkippedAnnotatedSourceFile {
+                original_path: "a_missing.cpp".to_string(),
+                sampled_lines: 1,
+                reason: "missing".to_string(),
+            },
+        ];
+
+        sort_manifest_entries(&mut files, &mut skipped_files);
+
+        assert_eq!(files[0].original_path, "a.cpp");
+        assert_eq!(files[1].original_path, "z.cpp");
+        assert_eq!(skipped_files[0].original_path, "a_missing.cpp");
+        assert_eq!(skipped_files[1].original_path, "z_missing.cpp");
+    }
+
+    #[test]
+    fn annotated_source_worker_count_is_bounded() {
+        assert_eq!(annotated_source_worker_count(0), 1);
+        assert!(annotated_source_worker_count(1) >= 1);
+        assert!(annotated_source_worker_count(1000) <= 4);
     }
 
     #[test]

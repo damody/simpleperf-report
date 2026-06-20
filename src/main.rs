@@ -7,7 +7,7 @@ mod source_profile;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use log::info;
 
@@ -142,6 +142,26 @@ fn apply_post_record_options(lib: &ffi::ReportLib, args: &LegacyArgs) -> Result<
     Ok(())
 }
 
+fn validate_legacy_record_file(path: &Path) -> Result<()> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to read record file '{}'", path.display()))?;
+    let mut header = [0u8; 64];
+    let bytes_read = std::io::Read::read(&mut file, &mut header)
+        .with_context(|| format!("Failed to read record file '{}'", path.display()))?;
+    if bytes_read == 0 {
+        bail!("record file '{}' is empty", path.display());
+    }
+    if bytes_read == header.len() && header.iter().all(|&byte| byte == 0) {
+        bail!(
+            "record file '{}' is not a simpleperf perf.data record: the file header is zeroed. \
+This usually means the file is incomplete or is raw Perfetto linux.perf data. \
+Use a perf.data produced by 'simpleperf record', or open the corresponding .perfetto-trace in the Perfetto page.",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn run_legacy(args: LegacyArgs) -> Result<()> {
     let dll_dir = find_dll_dir();
     info!("DLL directory: {:?}", dll_dir);
@@ -165,6 +185,7 @@ fn run_legacy(args: LegacyArgs) -> Result<()> {
 
     for record_file in &args.record_files {
         info!("Loading {}", record_file);
+        validate_legacy_record_file(Path::new(record_file))?;
         let lib =
             ffi::ReportLib::new(&dll_dir).context("Failed to load libsimpleperf_report.dll")?;
         apply_options(&lib, &args)?;
@@ -206,5 +227,28 @@ fn main() {
     if let Err(e) = result {
         eprintln!("Error: {:#}", e);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_record_file_with_zeroed_header_before_loading_dll() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/simpleperf_report_tests/zeroed-header-perf.data");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut bytes = vec![0u8; 128];
+        bytes.extend_from_slice(&[0x71, 0x23, 0, 0, 0, 0, 0, 0]);
+        std::fs::write(&path, bytes).unwrap();
+
+        let err = validate_legacy_record_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("not a simpleperf perf.data"),
+            "unexpected error: {err:#}"
+        );
     }
 }

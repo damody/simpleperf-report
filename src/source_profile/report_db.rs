@@ -275,7 +275,8 @@ mod tests {
         let bundle =
             SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
         let model = crate::source_profile::report_model::build_report_model(&bundle).unwrap();
-        let output = root.join("target/source_profile_tests/report_db_from_model/SourceLine.sqlite");
+        let output =
+            root.join("target/source_profile_tests/report_db_from_model/SourceLine.sqlite");
         if output.exists() {
             fs::remove_file(&output).unwrap();
         }

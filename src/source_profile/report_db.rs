@@ -8,6 +8,7 @@ use serde_json::json;
 use super::bundle::SourceProfileBundle;
 use super::report_model::{build_report_model, metric_value_text, ReportModel};
 
+#[allow(dead_code)]
 pub fn write_report_db(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
     let model = build_report_model(bundle)?;
     write_report_db_from_model(bundle, &model, output)

@@ -40,6 +40,7 @@ struct SkippedAnnotatedSourceFile {
     reason: String,
 }
 
+#[allow(dead_code)]
 pub fn write_annotated_sources(bundle: &SourceProfileBundle, output_dir: &Path) -> Result<()> {
     let model = build_report_model(bundle)?;
     write_annotated_sources_from_model(bundle, &model, output_dir)

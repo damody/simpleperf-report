@@ -15,7 +15,7 @@ use super::report_db::write_report_db_from_model;
 use super::report_launcher::write_report_launcher;
 use super::report_model::build_report_model;
 use super::schema::PathRemap;
-use super::xlsx_report::write_summary_workbook;
+use super::xlsx_report::write_summary_workbook_from_model;
 
 #[derive(Args, Debug, Clone)]
 pub struct SourceArgs {
@@ -131,7 +131,7 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
         path_remaps.len(),
         args.out_dir.display()
     );
-    let shared_model = if args.html || args.annotated_source_out.is_some() {
+    let shared_model = if args.html || args.xlsx || args.annotated_source_out.is_some() {
         let start = Instant::now();
         let model = build_report_model(&bundle)?;
         log_timing("source_command.build_report_model", start.elapsed());
@@ -153,8 +153,9 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
         log_timing("source_command.write_launcher", start.elapsed());
     }
     if args.xlsx {
+        let model = shared_model.as_ref().expect("shared model built for xlsx");
         let start = Instant::now();
-        write_summary_workbook(&bundle, &args.out_dir.join("SourceLine.xlsx"))?;
+        write_summary_workbook_from_model(&bundle, model, &args.out_dir.join("SourceLine.xlsx"))?;
         log_timing("source_command.write_xlsx", start.elapsed());
     }
     if args.json {
@@ -309,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn source_command_generates_html_and_annotated_source_in_one_invocation() {
+    fn source_command_generates_html_xlsx_and_annotated_source_in_one_invocation() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let out = root.join("target/source_profile_tests/cli_combined_html_annotated");
         let _ = fs::remove_dir_all(&out);
@@ -321,7 +322,7 @@ mod tests {
             path_remaps: Vec::new(),
             out_dir: out.clone(),
             html: true,
-            xlsx: false,
+            xlsx: true,
             json: false,
             csv: false,
             no_browser: true,
@@ -336,6 +337,7 @@ mod tests {
         run_source_command(args).unwrap();
 
         assert!(out.join("SourceLine.html").exists());
+        assert!(out.join("SourceLine.xlsx").exists());
         assert!(out.join("SourceLine.sqlite").exists());
         assert!(out.join("run_html.bat").exists());
         assert!(out.join("annotated_source/manifest.json").exists());

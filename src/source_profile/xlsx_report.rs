@@ -7,7 +7,8 @@ use rust_xlsxwriter::{Color, Format, FormatAlign, Workbook, Worksheet};
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, metric_value_number, metric_value_text, pmu_column_keys, SPE_COLUMNS,
+    build_report_model, metric_value_number, metric_value_text, pmu_column_keys, ReportModel,
+    SPE_COLUMNS,
 };
 use super::source_loader::{load_source_file, SourceLine};
 use super::summary::SourceReportSummary;
@@ -17,13 +18,21 @@ pub trait XlsxReportWriter {
 }
 
 pub fn write_summary_workbook(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
+    let model = build_report_model(bundle)?;
+    write_summary_workbook_from_model(bundle, &model, output)
+}
+
+pub fn write_summary_workbook_from_model(
+    bundle: &SourceProfileBundle,
+    model: &ReportModel,
+    output: &Path,
+) -> Result<()> {
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create '{}'", parent.display()))?;
     }
     let mut workbook = Workbook::new();
     let styles = WorkbookStyles::new();
-    let model = build_report_model(bundle)?;
     let worksheet = workbook.add_worksheet();
     worksheet.set_name("Summary")?;
     worksheet.write_string_with_format(0, 0, "Field", &styles.header)?;

@@ -707,6 +707,19 @@ pub struct LoadInstructionAddressAggregate {
     pub cpu_kinds: BTreeMap<u32, BTreeMap<LoadInstructionKind, SpeCategoryAggregate>>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct SpeHierarchyParentAggregate {
+    pub aggregate: SpeCategoryAggregate,
+    pub children: BTreeMap<InstructionClass, SpeCategoryAggregate>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SpeHierarchyAddressAggregate {
+    pub sample_count: u64,
+    pub parents: BTreeMap<SpeReportCategory, SpeHierarchyParentAggregate>,
+    pub cpu_parents: BTreeMap<u32, BTreeMap<SpeReportCategory, SpeHierarchyParentAggregate>>,
+}
+
 pub fn aggregate_spe_by_address(
     samples: &[SpeSample],
 ) -> BTreeMap<PmuAddressKey, SpeAddressAggregate> {
@@ -812,6 +825,78 @@ fn atomic_category(data_source: u16) -> SpeReportCategory {
     }
 }
 
+pub fn hierarchy_child_class(
+    parent: SpeReportCategory,
+    class: InstructionClass,
+) -> InstructionClass {
+    match parent {
+        SpeReportCategory::LoadL1
+        | SpeReportCategory::LoadL2
+        | SpeReportCategory::LoadL3
+        | SpeReportCategory::LoadLlc
+        | SpeReportCategory::LoadDram
+        | SpeReportCategory::LoadRemote
+        | SpeReportCategory::LoadIo
+        | SpeReportCategory::LoadUnknown => match class {
+            InstructionClass::ScalarLoad
+            | InstructionClass::VectorLoad
+            | InstructionClass::Atomic
+            | InstructionClass::AcquireRelease
+            | InstructionClass::Prefetch
+            | InstructionClass::MissingInstruction
+            | InstructionClass::UnknownInstruction => class,
+            _ => InstructionClass::UnknownInstruction,
+        },
+        SpeReportCategory::StoreL1
+        | SpeReportCategory::StoreL2
+        | SpeReportCategory::StoreL3
+        | SpeReportCategory::StoreLlc
+        | SpeReportCategory::StoreDram
+        | SpeReportCategory::StoreRemote
+        | SpeReportCategory::StoreIo
+        | SpeReportCategory::StoreUnknown => match class {
+            InstructionClass::ScalarStore
+            | InstructionClass::VectorStore
+            | InstructionClass::Atomic
+            | InstructionClass::AcquireRelease
+            | InstructionClass::MissingInstruction
+            | InstructionClass::UnknownInstruction => class,
+            _ => InstructionClass::UnknownInstruction,
+        },
+        SpeReportCategory::AtomicL1
+        | SpeReportCategory::AtomicL2
+        | SpeReportCategory::AtomicL3
+        | SpeReportCategory::AtomicDram
+        | SpeReportCategory::AtomicUnknown => match class {
+            InstructionClass::Atomic
+            | InstructionClass::AcquireRelease
+            | InstructionClass::ScalarLoad
+            | InstructionClass::ScalarStore
+            | InstructionClass::MissingInstruction
+            | InstructionClass::UnknownInstruction => class,
+            _ => InstructionClass::UnknownInstruction,
+        },
+        SpeReportCategory::BranchHit
+        | SpeReportCategory::BranchMiss
+        | SpeReportCategory::BranchUnknown => match class {
+            InstructionClass::Branch
+            | InstructionClass::MissingInstruction
+            | InstructionClass::UnknownInstruction => class,
+            _ => InstructionClass::UnknownInstruction,
+        },
+        SpeReportCategory::ComputeUnknown => match class {
+            InstructionClass::ComputeInt
+            | InstructionClass::ComputeFpSimd
+            | InstructionClass::ComputeCrypto
+            | InstructionClass::SystemInstruction
+            | InstructionClass::MissingInstruction
+            | InstructionClass::UnknownInstruction => class,
+            _ => InstructionClass::UnknownInstruction,
+        },
+        _ => class,
+    }
+}
+
 pub fn aggregate_spe_categories_by_address(
     samples: &[SpeSample],
 ) -> BTreeMap<PmuAddressKey, SpeAddressCategoryAggregate> {
@@ -841,6 +926,80 @@ pub fn aggregate_spe_categories_by_address(
         }
     }
     rows
+}
+
+pub fn aggregate_spe_hierarchy_by_address(
+    samples: &[SpeSample],
+    mut classify: impl FnMut(&SpeSample) -> InstructionClass,
+) -> BTreeMap<PmuAddressKey, SpeHierarchyAddressAggregate> {
+    let mut rows = BTreeMap::new();
+    for sample in samples {
+        let key = PmuAddressKey {
+            mapping_id: sample.mapping_id,
+            ip: sample.pc,
+        };
+        let parent_category = spe_category(sample);
+        let child_class = hierarchy_child_class(parent_category, classify(sample));
+        let row: &mut SpeHierarchyAddressAggregate = rows.entry(key).or_default();
+        row.sample_count = row.sample_count.saturating_add(1);
+
+        record_hierarchy_sample(
+            row.parents.entry(parent_category).or_default(),
+            child_class,
+            sample.latency_cycles,
+        );
+        record_hierarchy_sample(
+            row.cpu_parents
+                .entry(sample.cpu)
+                .or_default()
+                .entry(parent_category)
+                .or_default(),
+            child_class,
+            sample.latency_cycles,
+        );
+    }
+    rows
+}
+
+fn record_hierarchy_sample(
+    parent: &mut SpeHierarchyParentAggregate,
+    child: InstructionClass,
+    latency_cycles: Option<u32>,
+) {
+    parent.aggregate.sample_count = parent.aggregate.sample_count.saturating_add(1);
+    if let Some(latency) = latency_cycles {
+        parent.aggregate.record_latency(latency);
+    }
+
+    let child_row = parent.children.entry(child).or_default();
+    child_row.sample_count = child_row.sample_count.saturating_add(1);
+    if let Some(latency) = latency_cycles {
+        child_row.record_latency(latency);
+    }
+}
+
+pub fn hierarchy_by_cpu_from_address_aggregates(
+    rows: &BTreeMap<PmuAddressKey, SpeHierarchyAddressAggregate>,
+) -> BTreeMap<u32, BTreeMap<SpeReportCategory, SpeHierarchyParentAggregate>> {
+    let mut by_cpu =
+        BTreeMap::<u32, BTreeMap<SpeReportCategory, SpeHierarchyParentAggregate>>::new();
+    for row in rows.values() {
+        for (cpu, parents) in &row.cpu_parents {
+            let cpu_row = by_cpu.entry(*cpu).or_default();
+            for (category, parent) in parents {
+                let output_parent = cpu_row.entry(*category).or_default();
+                output_parent.aggregate.merge_from(&parent.aggregate);
+                for (child, aggregate) in &parent.children {
+                    output_parent
+                        .children
+                        .entry(*child)
+                        .or_default()
+                        .merge_from(aggregate);
+                }
+            }
+        }
+    }
+    by_cpu
 }
 
 pub fn aggregate_instruction_classes_by_address(
@@ -917,6 +1076,34 @@ mod tests {
 
     use super::*;
     use crate::source_profile::sample_stream::read_pmu_samples;
+
+    fn spe_test_sample(
+        cpu: u32,
+        pc: u64,
+        operation_flags: u32,
+        data_source: u16,
+        latency_cycles: Option<u32>,
+    ) -> SpeSample {
+        SpeSample {
+            flags: 0,
+            event_run_ref: 0,
+            pid: 1,
+            tid: 10,
+            cpu,
+            mapping_id: 7,
+            timestamp_ns: pc,
+            pc,
+            latency_cycles,
+            operation_flags,
+            event_flags: 0,
+            cache_level: 0,
+            cache_result: 0,
+            branch_result: 0,
+            data_source,
+            decode_status: 0,
+            raw_packet_offset: 0,
+        }
+    }
 
     #[test]
     fn aggregates_minimal_pmu_samples_by_address() {
@@ -1183,6 +1370,71 @@ mod tests {
         assert_eq!(
             row.categories[&SpeReportCategory::StoreUnknown].std_latency_cycles(),
             Some(0.0)
+        );
+    }
+
+    #[test]
+    fn aggregate_spe_hierarchy_keeps_same_child_under_different_parents() {
+        let samples = vec![
+            spe_test_sample(4, 0x1000, SPE_OP_LOAD, 0x00, Some(10)),
+            spe_test_sample(4, 0x1004, SPE_OP_LOAD, 0x08, Some(30)),
+            spe_test_sample(4, 0x1008, SPE_OP_LOAD, 0x00, Some(50)),
+        ];
+
+        let rows = aggregate_spe_hierarchy_by_address(&samples, |sample| match sample.pc {
+            0x1000 | 0x1004 => InstructionClass::VectorLoad,
+            0x1008 => InstructionClass::ScalarLoad,
+            _ => InstructionClass::MissingInstruction,
+        });
+
+        let cpu_rows = hierarchy_by_cpu_from_address_aggregates(&rows);
+        let cpu4 = cpu_rows.get(&4).unwrap();
+        let load_l1 = cpu4.get(&SpeReportCategory::LoadL1).unwrap();
+        let load_l2 = cpu4.get(&SpeReportCategory::LoadL2).unwrap();
+
+        assert_eq!(load_l1.aggregate.sample_count, 2);
+        assert_eq!(load_l1.aggregate.latency_cycles_sum, 60);
+        assert_eq!(
+            load_l1.children[&InstructionClass::VectorLoad].sample_count,
+            1
+        );
+        assert_eq!(
+            load_l1.children[&InstructionClass::ScalarLoad].sample_count,
+            1
+        );
+        assert_eq!(load_l2.aggregate.sample_count, 1);
+        assert_eq!(load_l2.aggregate.latency_cycles_sum, 30);
+        assert_eq!(
+            load_l2.children[&InstructionClass::VectorLoad].sample_count,
+            1
+        );
+        assert_eq!(
+            load_l2.children[&InstructionClass::VectorLoad].latency_cycles_sum,
+            30
+        );
+    }
+
+    #[test]
+    fn aggregate_spe_hierarchy_places_compute_class_under_compute_unknown() {
+        let samples = vec![spe_test_sample(6, 0x2000, SPE_OP_OTHER, 0, Some(70))];
+
+        let rows = aggregate_spe_hierarchy_by_address(&samples, |_| InstructionClass::ComputeInt);
+        let cpu_rows = hierarchy_by_cpu_from_address_aggregates(&rows);
+        let compute = cpu_rows
+            .get(&6)
+            .unwrap()
+            .get(&SpeReportCategory::ComputeUnknown)
+            .unwrap();
+
+        assert_eq!(compute.aggregate.sample_count, 1);
+        assert_eq!(compute.aggregate.latency_cycles_sum, 70);
+        assert_eq!(
+            compute.children[&InstructionClass::ComputeInt].sample_count,
+            1
+        );
+        assert_eq!(
+            compute.children[&InstructionClass::ComputeInt].latency_cycles_sum,
+            70
         );
     }
 

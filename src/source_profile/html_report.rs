@@ -105,7 +105,8 @@ pub fn write_html_summary_from_model(
     .column-panel[open] > summary {{ margin-bottom: 6px; }}
     .column-picker-controls {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, max-content)); gap: 8px 18px; align-items: start; }}
     .column-group {{ display: grid; gap: 3px; align-content: start; }}
-    .column-group-title {{ font-size: 12px; font-weight: 700; color: #57606a; text-transform: uppercase; }}
+    .column-group-title {{ display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #57606a; text-transform: uppercase; }}
+    .column-group-title input {{ width: 16px; height: 16px; }}
     .column-group label {{ white-space: nowrap; }}
     details.report-section {{ margin-top: 24px; }}
     details.report-section > summary {{ cursor: pointer; font-size: 18px; font-weight: 600; }}
@@ -338,19 +339,47 @@ pub fn write_html_summary_from_model(
       }}
       renderSourceHeaders();
       renderSourceBody();
+      updateSourceColumnGroupChecks();
+    }}
+    function toggleSourceColumnGroup(groupIndex, checked) {{
+      const byKey = new Map(SOURCE_COLUMNS.map(column => [column.key, column]));
+      const keys = SOURCE_COLUMN_GROUPS[groupIndex].keys.filter(key => byKey.has(key));
+      if (checked) {{
+        keys.forEach(key => visibleSourceColumns.add(key));
+      }} else {{
+        keys.forEach(key => visibleSourceColumns.delete(key));
+        if (visibleSourceColumns.size === 0 && keys.length > 0) {{
+          visibleSourceColumns.add(keys[0]);
+        }}
+      }}
+      renderSourceHeaders();
+      renderSourceBody();
+      renderSourceColumnPicker();
+    }}
+    function updateSourceColumnGroupChecks() {{
+      const byKey = new Map(SOURCE_COLUMNS.map(column => [column.key, column]));
+      SOURCE_COLUMN_GROUPS.forEach((group, index) => {{
+        const input = document.querySelector(`input[data-column-group="${{index}}"]`);
+        if (!input) return;
+        const keys = group.keys.filter(key => byKey.has(key));
+        const selected = keys.filter(key => visibleSourceColumns.has(key)).length;
+        input.checked = keys.length > 0 && selected === keys.length;
+        input.indeterminate = selected > 0 && selected < keys.length;
+      }});
     }}
     function renderSourceColumnPicker() {{
       const byKey = new Map(SOURCE_COLUMNS.map(column => [column.key, column]));
       document.getElementById("sourceColumnPicker").innerHTML = SOURCE_COLUMN_GROUPS
-        .map(group => {{
+        .map((group, groupIndex) => {{
           const controls = group.keys
             .map(key => byKey.get(key))
             .filter(Boolean)
             .map(column => `<label><input type="checkbox" onchange="toggleSourceColumn('${{column.key}}', this.checked)" ${{visibleSourceColumns.has(column.key) ? "checked" : ""}}> ${{escapeText(column.label)}}</label>`)
             .join("");
-          return `<div class="column-group"><div class="column-group-title">${{escapeText(group.title)}}</div>${{controls}}</div>`;
+          return `<div class="column-group"><label class="column-group-title"><input type="checkbox" data-column-group="${{groupIndex}}" onchange="toggleSourceColumnGroup(${{groupIndex}}, this.checked)"> ${{escapeText(group.title)}}</label>${{controls}}</div>`;
         }})
         .join("");
+      updateSourceColumnGroupChecks();
     }}
     function renderSourceHeaders() {{
       document.getElementById("sourceHeaderRow").innerHTML = visibleSourceColumnList().map(column => `<th class="${{escapeText(column.cls || "col-metric")}}" data-source-sort="${{escapeText(column.key)}}" onclick="sortSourceRows('${{escapeText(column.key)}}')">${{escapeText(column.label)}} <span class="sort-indicator"></span></th>`).join("");
@@ -1155,6 +1184,10 @@ mod tests {
         assert!(html.contains("SPE_COLUMNS"));
         assert!(html.contains("visibleSourceColumns"));
         assert!(html.contains("toggleSourceColumn"));
+        assert!(html.contains("toggleSourceColumnGroup"));
+        assert!(html.contains("updateSourceColumnGroupChecks"));
+        assert!(html.contains("data-column-group"));
+        assert!(html.contains("input.indeterminate"));
         assert!(html.contains("renderSourceHeaders"));
         assert!(html.contains("renderSourceBody"));
         assert!(html.contains("sample_count"));

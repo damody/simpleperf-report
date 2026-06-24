@@ -15,7 +15,7 @@ use rusqlite::{params_from_iter, types::Value, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
-use super::report_model::SPE_COLUMNS;
+use super::report_model::{SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES, SPE_COLUMNS};
 
 pub const DEFAULT_PAGE_SIZE: u32 = 1000;
 pub const MAX_PAGE_SIZE: u32 = 10000;
@@ -461,7 +461,7 @@ fn source_order_by(
         "l1d_cache_hit_rate" => "CAST(l1d_cache_hit_rate AS REAL)",
         "mips" => "CAST(mips AS REAL)",
         "mcps" => "CAST(mcps AS REAL)",
-        key if SPE_COLUMNS.contains(&key) => {
+        key if is_spe_metric_sort_key(key) => {
             return metric_order_by("spe_json", key, desc, sampled_first, function_first);
         }
         "code" => "code",
@@ -489,6 +489,16 @@ fn is_metric_sort_key(key: &str) -> bool {
         .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
+fn is_spe_metric_sort_key(key: &str) -> bool {
+    if SPE_COLUMNS.contains(&key) {
+        return true;
+    }
+    let Some((category, metric)) = key.split_once('.') else {
+        return false;
+    };
+    SPE_CATEGORY_NAMES.contains(&category) && SPE_CATEGORY_METRICS.contains(&metric)
+}
+
 fn metric_order_by(
     json_column: &str,
     key: &str,
@@ -507,8 +517,9 @@ fn metric_order_by(
     } else {
         ""
     };
+    let json_path = format!("$.\"{key}\"");
     format!(
-        "ORDER BY {sampled_prefix}{function_prefix}CAST(json_extract({json_column}, '$.{key}') AS REAL) {direction}, file ASC, line ASC"
+        "ORDER BY {sampled_prefix}{function_prefix}CAST(json_extract({json_column}, '{json_path}') AS REAL) {direction}, file ASC, line ASC"
     )
 }
 
@@ -661,21 +672,25 @@ mod tests {
             ("file_acc_p_pct", "file_acc_p_pct ASC"),
             (
                 "cpu_cycles",
-                "json_extract(pmu_json, '$.cpu_cycles') AS REAL) ASC",
+                "json_extract(pmu_json, '$.\"cpu_cycles\"') AS REAL) ASC",
             ),
             (
                 "stall_backend",
-                "json_extract(pmu_json, '$.stall_backend') AS REAL) ASC",
+                "json_extract(pmu_json, '$.\"stall_backend\"') AS REAL) ASC",
             ),
             ("cpi", "CAST(cpi AS REAL) ASC"),
             ("l1d_cache_hit_rate", "CAST(l1d_cache_hit_rate AS REAL) ASC"),
             (
                 "branch_miss_rate",
-                "json_extract(pmu_json, '$.branch_miss_rate') AS REAL) ASC",
+                "json_extract(pmu_json, '$.\"branch_miss_rate\"') AS REAL) ASC",
             ),
             (
                 "spe_sample_count",
-                "json_extract(spe_json, '$.spe_sample_count') AS REAL) ASC",
+                "json_extract(spe_json, '$.\"spe_sample_count\"') AS REAL) ASC",
+            ),
+            (
+                "load_dram.est_time_pct",
+                "json_extract(spe_json, '$.\"load_dram.est_time_pct\"') AS REAL) ASC",
             ),
             ("mips", "CAST(mips AS REAL) ASC"),
             ("mcps", "CAST(mcps AS REAL) ASC"),

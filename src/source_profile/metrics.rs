@@ -534,6 +534,44 @@ pub struct SpeAddressAggregate {
     pub decode_error_count: u64,
 }
 
+pub const SPE_OP_LOAD: u32 = 1 << 0;
+pub const SPE_OP_STORE: u32 = 1 << 1;
+pub const SPE_OP_BRANCH: u32 = 1 << 2;
+pub const SPE_OP_OTHER: u32 = 1 << 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SpeReportCategory {
+    CpuInstruction,
+    LoadL1,
+    LoadL2,
+    LoadL3,
+    LoadLlc,
+    LoadDram,
+    LoadUnknown,
+    StoreL1,
+    StoreL2,
+    StoreL3,
+    StoreLlc,
+    StoreDram,
+    StoreUnknown,
+    Branch,
+    Other,
+    DecodeUnknown,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SpeCategoryAggregate {
+    pub sample_count: u64,
+    pub latency_cycles_sum: u64,
+    pub latency_sample_count: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SpeAddressCategoryAggregate {
+    pub sample_count: u64,
+    pub categories: BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
+}
+
 pub fn aggregate_spe_by_address(
     samples: &[SpeSample],
 ) -> BTreeMap<PmuAddressKey, SpeAddressAggregate> {
@@ -568,6 +606,63 @@ pub fn aggregate_spe_by_address(
         row.event_flags_or |= sample.event_flags;
         if sample.decode_status != 0 {
             row.decode_error_count += 1;
+        }
+    }
+    rows
+}
+
+pub fn spe_category(sample: &SpeSample) -> SpeReportCategory {
+    if sample.decode_status != 0 {
+        return SpeReportCategory::DecodeUnknown;
+    }
+    if sample.operation_flags & SPE_OP_LOAD != 0 {
+        return match sample.data_source {
+            u16::MAX => SpeReportCategory::LoadUnknown,
+            0x00 => SpeReportCategory::LoadL1,
+            0x08 => SpeReportCategory::LoadL2,
+            0x09 | 0x0a => SpeReportCategory::LoadL3,
+            0x0b => SpeReportCategory::LoadLlc,
+            0x0e => SpeReportCategory::LoadDram,
+            _ => SpeReportCategory::LoadUnknown,
+        };
+    }
+    if sample.operation_flags & SPE_OP_STORE != 0 {
+        return match sample.data_source {
+            u16::MAX => SpeReportCategory::StoreUnknown,
+            0x00 => SpeReportCategory::StoreL1,
+            0x08 => SpeReportCategory::StoreL2,
+            0x09 | 0x0a => SpeReportCategory::StoreL3,
+            0x0b => SpeReportCategory::StoreLlc,
+            0x0e => SpeReportCategory::StoreDram,
+            _ => SpeReportCategory::StoreUnknown,
+        };
+    }
+    if sample.operation_flags & SPE_OP_BRANCH != 0 {
+        return SpeReportCategory::Branch;
+    }
+    if sample.operation_flags & SPE_OP_OTHER != 0 {
+        return SpeReportCategory::Other;
+    }
+    SpeReportCategory::CpuInstruction
+}
+
+pub fn aggregate_spe_categories_by_address(
+    samples: &[SpeSample],
+) -> BTreeMap<PmuAddressKey, SpeAddressCategoryAggregate> {
+    let mut rows = BTreeMap::new();
+    for sample in samples {
+        let key = PmuAddressKey {
+            mapping_id: sample.mapping_id,
+            ip: sample.pc,
+        };
+        let row: &mut SpeAddressCategoryAggregate = rows.entry(key).or_default();
+        row.sample_count += 1;
+        let category = spe_category(sample);
+        let category_row = row.categories.entry(category).or_default();
+        category_row.sample_count += 1;
+        if let Some(latency) = sample.latency_cycles {
+            category_row.latency_cycles_sum += u64::from(latency);
+            category_row.latency_sample_count += 1;
         }
     }
     rows
@@ -738,6 +833,73 @@ mod tests {
         assert_eq!(row.branch_mispredict, 1);
         assert_eq!(row.data_source_counts.get(&7), Some(&2));
         assert_eq!(row.decode_error_count, 1);
+    }
+
+    #[test]
+    fn aggregates_spe_categories_by_address() {
+        let samples = vec![
+            SpeSample {
+                flags: 0,
+                event_run_ref: 0,
+                pid: 1,
+                tid: 1,
+                cpu: 0,
+                mapping_id: 7,
+                timestamp_ns: 100,
+                pc: 0x1000,
+                latency_cycles: Some(10),
+                operation_flags: SPE_OP_LOAD,
+                event_flags: 0,
+                cache_level: 0,
+                cache_result: 0,
+                branch_result: 0,
+                data_source: 0x0e,
+                decode_status: 0,
+                raw_packet_offset: 0,
+            },
+            SpeSample {
+                flags: 0,
+                event_run_ref: 0,
+                pid: 1,
+                tid: 1,
+                cpu: 0,
+                mapping_id: 7,
+                timestamp_ns: 110,
+                pc: 0x1000,
+                latency_cycles: Some(30),
+                operation_flags: SPE_OP_STORE,
+                event_flags: 0,
+                cache_level: 0,
+                cache_result: 0,
+                branch_result: 0,
+                data_source: u16::MAX,
+                decode_status: 0,
+                raw_packet_offset: 8,
+            },
+        ];
+
+        let rows = aggregate_spe_categories_by_address(&samples);
+        let row = rows
+            .get(&PmuAddressKey {
+                mapping_id: 7,
+                ip: 0x1000,
+            })
+            .unwrap();
+
+        assert_eq!(row.sample_count, 2);
+        assert_eq!(row.categories[&SpeReportCategory::LoadDram].sample_count, 1);
+        assert_eq!(
+            row.categories[&SpeReportCategory::LoadDram].latency_cycles_sum,
+            10
+        );
+        assert_eq!(
+            row.categories[&SpeReportCategory::StoreUnknown].sample_count,
+            1
+        );
+        assert_eq!(
+            row.categories[&SpeReportCategory::StoreUnknown].latency_cycles_sum,
+            30
+        );
     }
 
     #[test]

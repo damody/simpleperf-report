@@ -13,8 +13,9 @@ use super::line_resolver::{
     resolve_source_path, runtime_address_to_relative, CachedElfLineResolver,
 };
 use super::metrics::{
-    aggregate_pmu_file, aggregate_spe_by_address, compute_percentages, derive_pmu_metrics,
-    MetricValue, PmuAddressAggregate, SpeAddressAggregate,
+    aggregate_pmu_file, aggregate_spe_by_address, aggregate_spe_categories_by_address,
+    compute_percentages, derive_pmu_metrics, MetricValue, PmuAddressAggregate, SpeAddressAggregate,
+    SpeAddressCategoryAggregate,
 };
 use super::sample_stream::{for_each_pmu_sample, read_spe_samples, PmuSample};
 use super::schema::ProcessMapRecord;
@@ -221,6 +222,7 @@ struct MutableLineRow {
     pmu_acc_samples: BTreeMap<String, u64>,
     pmu_sample_count: u64,
     spe: Option<SpeAddressAggregate>,
+    spe_categories: Option<SpeAddressCategoryAggregate>,
     unresolved: Vec<String>,
 }
 
@@ -262,6 +264,7 @@ impl MutableLineRow {
             pmu_acc_samples: BTreeMap::new(),
             pmu_sample_count: 0,
             spe: None,
+            spe_categories: None,
             unresolved: Vec::new(),
         }
     }
@@ -376,6 +379,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         phase_start = Instant::now();
         let (_, samples) = read_spe_samples(path)?;
         let aggregates = aggregate_spe_by_address(&samples);
+        let mut category_aggregates = aggregate_spe_categories_by_address(&samples);
         log_timing("build_model.spe_read_aggregate", phase_start.elapsed());
 
         phase_start = Instant::now();
@@ -406,6 +410,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 }
                 row.function = prefer_nonempty(&row.function, function);
                 row.module = prefer_nonempty(&row.module, module);
+                row.spe_categories = category_aggregates.remove(&key);
                 row.spe = Some(aggregate);
             } else {
                 warnings.push(format!(
@@ -1659,6 +1664,7 @@ mod tests {
             pmu_acc_samples: BTreeMap::new(),
             pmu_sample_count: 2,
             spe: None,
+            spe_categories: None,
             unresolved: Vec::new(),
         };
         let rows = finalize_rows(
@@ -1887,8 +1893,7 @@ mod tests {
             "mprofiler-unparseable-elf-{}.so",
             std::process::id()
         ));
-        std::fs::write(&path, b"\x7fELF\x02\x01\x01")
-            .expect("write malformed ELF fixture");
+        std::fs::write(&path, b"\x7fELF\x02\x01\x01").expect("write malformed ELF fixture");
         let matches = BTreeMap::from([(
             "libbad.so".to_string(),
             crate::source_profile::symbol_resolver::ElfMatch {

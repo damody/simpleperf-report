@@ -2200,6 +2200,28 @@ mod tests {
     }
 
     #[test]
+    fn spe_hierarchy_rows_show_empty_state_when_no_hierarchy_samples() {
+        let model = ReportModel {
+            rows: Vec::new(),
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::new(),
+            spe_cpu_category_histograms: BTreeMap::new(),
+            spe_hierarchical_cpu_values: BTreeMap::new(),
+            spe_hierarchical_cpu_histograms: BTreeMap::new(),
+            instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
+            warnings: Vec::new(),
+        };
+
+        let rows = spe_hierarchy_summary_rows_html(&model, true);
+
+        assert!(rows.contains("No SPE hierarchy samples"));
+    }
+
+    #[test]
     fn html_renders_spe_hierarchy_rows_with_clickable_histograms() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
@@ -2309,7 +2331,11 @@ mod tests {
 
         let rows = spe_hierarchy_summary_rows_html(&model, true);
 
+        assert!(rows.contains("data-spe-cpu=\"4\" data-spe-parent=\"load_l1\" data-spe-child=\"\""));
         assert!(rows.contains("data-spe-parent=\"load_l1\" data-spe-child=\"\""));
+        assert!(rows.contains(
+            "data-spe-cpu=\"4\" data-spe-parent=\"load_l1\" data-spe-child=\"vector_load\""
+        ));
         assert!(rows.contains("data-spe-parent=\"load_l1\" data-spe-child=\"vector_load\""));
         assert!(rows.contains("onclick=\"renderSpeHierarchyHistogram(this)\""));
         assert!(rows.contains("class=\"spe-child-label\""));
@@ -2321,6 +2347,8 @@ mod tests {
         assert!(html.contains("<summary>SPE Hierarchical Breakdown</summary>"));
         assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS ="));
         assert!(html.contains("function renderSpeHierarchyHistogram"));
+        assert!(html.contains(r#"const key = child ? `${parent}.${child}` : parent;"#));
+        assert!(html.contains("SPE_HIERARCHY_HISTOGRAMS?.[cpu]?.[key]"));
     }
 
     #[test]

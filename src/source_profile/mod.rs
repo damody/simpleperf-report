@@ -3,6 +3,7 @@ pub mod bundle;
 pub mod cli;
 pub mod html_report;
 pub mod httpd;
+pub mod instruction_class;
 pub mod line_resolver;
 pub mod machine_report;
 pub mod metrics;

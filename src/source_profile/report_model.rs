@@ -95,7 +95,15 @@ pub const SPE_CATEGORY_NAMES: &[&str] = &[
     "other_unknown",
 ];
 
-pub const SPE_CATEGORY_METRICS: &[&str] = &["sample_pct", "spe_latency_pct", "est_time_pct"];
+pub const SPE_CATEGORY_METRICS: &[&str] = &[
+    "sample_pct",
+    "spe_latency_pct",
+    "est_time_pct",
+    "min_latency_cycles",
+    "max_latency_cycles",
+    "avg_latency_cycles",
+    "std_latency_cycles",
+];
 
 pub fn spe_category_column_keys() -> Vec<String> {
     let mut keys = Vec::new();
@@ -479,10 +487,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     }
 
     phase_start = Instant::now();
-    let pmu_cpu_cycles = pmu_cpu_cycles_by_cpu(bundle);
-    let spe_effective_period = spe_effective_period(bundle);
-    let spe_cpu_category_values =
-        make_spe_cpu_category_values(&rows, &pmu_cpu_cycles, spe_effective_period);
+    let spe_cpu_category_values = make_spe_cpu_category_values(&rows);
     let mut line_rows = finalize_rows(bundle, rows);
     compute_row_percentages(&mut line_rows);
     append_attribution_diagnostics(bundle, &line_rows, &mut warnings);
@@ -1100,37 +1105,19 @@ fn merge_spe(row: &mut MutableLineRow, aggregate: SpeAddressAggregate) {
 fn merge_spe_categories(row: &mut MutableLineRow, aggregate: SpeAddressCategoryAggregate) {
     for (category, category_aggregate) in aggregate.categories {
         let row_category = row.spe_categories.entry(category).or_default();
-        row_category.sample_count = row_category
-            .sample_count
-            .saturating_add(category_aggregate.sample_count);
-        row_category.latency_cycles_sum = row_category
-            .latency_cycles_sum
-            .saturating_add(category_aggregate.latency_cycles_sum);
-        row_category.latency_sample_count = row_category
-            .latency_sample_count
-            .saturating_add(category_aggregate.latency_sample_count);
+        row_category.merge_from(&category_aggregate);
     }
     for (cpu, categories) in aggregate.cpu_categories {
         let row_cpu_categories = row.spe_cpu_categories.entry(cpu).or_default();
         for (category, category_aggregate) in categories {
             let row_category = row_cpu_categories.entry(category).or_default();
-            row_category.sample_count = row_category
-                .sample_count
-                .saturating_add(category_aggregate.sample_count);
-            row_category.latency_cycles_sum = row_category
-                .latency_cycles_sum
-                .saturating_add(category_aggregate.latency_cycles_sum);
-            row_category.latency_sample_count = row_category
-                .latency_sample_count
-                .saturating_add(category_aggregate.latency_sample_count);
+            row_category.merge_from(&category_aggregate);
         }
     }
 }
 
 fn make_spe_cpu_category_values(
     rows: &BTreeMap<(PathBuf, u32), MutableLineRow>,
-    pmu_cpu_cycles: &BTreeMap<u32, f64>,
-    spe_effective_period: f64,
 ) -> BTreeMap<u32, BTreeMap<String, MetricValue>> {
     let mut cpu_categories =
         BTreeMap::<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>::new();
@@ -1139,15 +1126,7 @@ fn make_spe_cpu_category_values(
             let cpu_category_map = cpu_categories.entry(*cpu).or_default();
             for (category, category_aggregate) in categories {
                 let cpu_category = cpu_category_map.entry(*category).or_default();
-                cpu_category.sample_count = cpu_category
-                    .sample_count
-                    .saturating_add(category_aggregate.sample_count);
-                cpu_category.latency_cycles_sum = cpu_category
-                    .latency_cycles_sum
-                    .saturating_add(category_aggregate.latency_cycles_sum);
-                cpu_category.latency_sample_count = cpu_category
-                    .latency_sample_count
-                    .saturating_add(category_aggregate.latency_sample_count);
+                cpu_category.merge_from(category_aggregate);
             }
         }
     }
@@ -1165,16 +1144,91 @@ fn make_spe_cpu_category_values(
                 .sum::<u64>();
             (
                 cpu,
-                make_spe_category_values(
-                    &categories,
-                    total_samples,
-                    total_latency_cycles,
-                    pmu_cpu_cycles.get(&cpu).copied(),
-                    spe_effective_period,
-                ),
+                make_spe_category_summary_values(&categories, total_samples, total_latency_cycles),
             )
         })
         .collect()
+}
+
+fn make_spe_category_summary_values(
+    by_category: &BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
+    total_spe_samples: u64,
+    total_spe_latency_cycles: u64,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    for (category, name) in spe_report_categories() {
+        let aggregate = by_category.get(&category);
+        let sample_count = aggregate.map(|value| value.sample_count).unwrap_or(0);
+        let latency_cycles = aggregate.map(|value| value.latency_cycles_sum).unwrap_or(0);
+        let latency_sample_count = aggregate
+            .map(|value| value.latency_sample_count)
+            .unwrap_or(0);
+        let sample_pct = percent(sample_count as f64, total_spe_samples as f64);
+        let est_time_pct = percent(latency_cycles as f64, total_spe_latency_cycles as f64);
+        let has_samples = sample_count > 0;
+        let has_latency = latency_sample_count > 0;
+
+        values.insert(
+            format!("{name}.sample_pct"),
+            MetricValue::Number(sample_pct),
+        );
+        values.insert(
+            format!("{name}.spe_latency_pct"),
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(est_time_pct)
+            },
+        );
+        values.insert(
+            format!("{name}.est_time_pct"),
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(est_time_pct)
+            },
+        );
+        values.extend(spe_category_latency_metric_values(name, aggregate));
+    }
+    values
+}
+
+fn spe_category_latency_metric_values(
+    name: &str,
+    aggregate: Option<&SpeCategoryAggregate>,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    let has_samples = aggregate
+        .map(|value| value.sample_count > 0)
+        .unwrap_or(false);
+    let has_latency = aggregate
+        .map(|value| value.latency_sample_count > 0)
+        .unwrap_or(false);
+    let missing_or_zero = |value: Option<f64>| {
+        if has_samples && !has_latency {
+            MetricValue::Missing("SPE latency field unavailable".to_string())
+        } else {
+            MetricValue::Number(value.unwrap_or(0.0))
+        }
+    };
+
+    values.insert(
+        format!("{name}.min_latency_cycles"),
+        missing_or_zero(aggregate.and_then(|value| value.latency_cycles_min.map(f64::from))),
+    );
+    values.insert(
+        format!("{name}.max_latency_cycles"),
+        missing_or_zero(aggregate.and_then(|value| value.latency_cycles_max.map(f64::from))),
+    );
+    values.insert(
+        format!("{name}.avg_latency_cycles"),
+        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::avg_latency_cycles)),
+    );
+    values.insert(
+        format!("{name}.std_latency_cycles"),
+        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::std_latency_cycles)),
+    );
+    values
 }
 
 fn pmu_cpu_cycles_by_cpu(bundle: &SourceProfileBundle) -> BTreeMap<u32, f64> {
@@ -1544,6 +1598,7 @@ fn make_spe_category_values(
                 spe_effective_period,
             ),
         );
+        values.extend(spe_category_latency_metric_values(name, aggregate));
     }
     values
 }
@@ -2056,6 +2111,10 @@ mod tests {
                 sample_count: 1,
                 latency_cycles_sum: 25,
                 latency_sample_count: 1,
+                latency_cycles_square_sum: 625.0,
+                latency_cycles_min: Some(25),
+                latency_cycles_max: Some(25),
+                ..SpeCategoryAggregate::default()
             },
         );
         by_category.insert(
@@ -2064,6 +2123,10 @@ mod tests {
                 sample_count: 2,
                 latency_cycles_sum: 60,
                 latency_sample_count: 2,
+                latency_cycles_square_sum: 2000.0,
+                latency_cycles_min: Some(20),
+                latency_cycles_max: Some(40),
+                ..SpeCategoryAggregate::default()
             },
         );
         by_category.insert(
@@ -2072,6 +2135,10 @@ mod tests {
                 sample_count: 1,
                 latency_cycles_sum: 40,
                 latency_sample_count: 1,
+                latency_cycles_square_sum: 1600.0,
+                latency_cycles_min: Some(40),
+                latency_cycles_max: Some(40),
+                ..SpeCategoryAggregate::default()
             },
         );
 
@@ -2088,6 +2155,22 @@ mod tests {
         assert!(matches!(
             values.get("load_dram.est_time_pct"),
             Some(MetricValue::Number(value)) if (*value - 60.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_dram.min_latency_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 20.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_dram.max_latency_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 40.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_dram.avg_latency_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 30.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_dram.std_latency_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 10.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
             values.get("store_unknown.sample_pct"),
@@ -2112,6 +2195,7 @@ mod tests {
                 sample_count: 3,
                 latency_cycles_sum: 30,
                 latency_sample_count: 3,
+                ..SpeCategoryAggregate::default()
             },
         );
         by_category.insert(
@@ -2120,6 +2204,7 @@ mod tests {
                 sample_count: 1,
                 latency_cycles_sum: 70,
                 latency_sample_count: 1,
+                ..SpeCategoryAggregate::default()
             },
         );
         let values = make_spe_category_values(&by_category, 4, 100, None, 100.0);
@@ -2133,6 +2218,67 @@ mod tests {
             Some(MetricValue::Missing(reason)) if reason.contains("PMU cpu_cycles")
         ));
         assert!(values.get("branch_unknown.pmu_cycles_pct").is_none());
+    }
+
+    #[test]
+    fn spe_cpu_category_summary_est_time_is_per_cpu_distribution() {
+        let mut row = MutableLineRow::new(PathBuf::from("fixture.cpp"), 1, "Tick();".to_string());
+        row.spe_cpu_categories.insert(
+            6,
+            BTreeMap::from([
+                (
+                    SpeReportCategory::LoadL1,
+                    SpeCategoryAggregate {
+                        sample_count: 2,
+                        latency_cycles_sum: 30,
+                        latency_sample_count: 2,
+                        latency_cycles_square_sum: 500.0,
+                        latency_cycles_min: Some(10),
+                        latency_cycles_max: Some(20),
+                    },
+                ),
+                (
+                    SpeReportCategory::StoreUnknown,
+                    SpeCategoryAggregate {
+                        sample_count: 1,
+                        latency_cycles_sum: 70,
+                        latency_sample_count: 1,
+                        latency_cycles_square_sum: 4900.0,
+                        latency_cycles_min: Some(70),
+                        latency_cycles_max: Some(70),
+                    },
+                ),
+            ]),
+        );
+
+        let values =
+            make_spe_cpu_category_values(&BTreeMap::from([((row.file.clone(), row.line), row)]));
+        let cpu_values = values.get(&6).expect("cpu 6 summary");
+
+        assert!(matches!(
+            cpu_values.get("load_l1.est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 30.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            cpu_values.get("store_unknown.est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 70.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            cpu_values.get("load_l1.min_latency_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 10.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            cpu_values.get("load_l1.max_latency_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 20.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            cpu_values.get("load_l1.avg_latency_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 15.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            cpu_values.get("load_l1.std_latency_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 5.0).abs() < f64::EPSILON
+        ));
     }
 
     #[test]

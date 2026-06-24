@@ -109,6 +109,12 @@ pub fn write_html_summary_from_model(
     .column-group-title {{ display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: #57606a; text-transform: uppercase; }}
     .column-group-title input {{ width: 16px; height: 16px; }}
     .column-group label {{ white-space: nowrap; }}
+    .spe-summary-table tbody tr.cpu-shade-0 td {{ background: #f7fbff; }}
+    .spe-summary-table tbody tr.cpu-shade-1 td {{ background: #f7fff9; }}
+    .spe-summary-table tbody tr.cpu-shade-2 td {{ background: #fffdf4; }}
+    .spe-summary-table tbody tr.cpu-shade-3 td {{ background: #fff8fb; }}
+    .spe-summary-table tbody tr.cpu-shade-4 td {{ background: #f8fbfa; }}
+    .spe-summary-table tbody tr.cpu-shade-5 td {{ background: #fbf8ff; }}
     details.report-section {{ margin-top: 24px; }}
     details.report-section > summary {{ cursor: pointer; font-size: 18px; font-weight: 600; }}
     details.report-section > table,
@@ -140,8 +146,8 @@ pub fn write_html_summary_from_model(
   </details>
   <details class="report-section" open>
   <summary>SPE Category Summary</summary>
-  <table>
-    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th></tr>
+  <table class="spe-summary-table">
+    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th></tr>
     {spe_category_summary_rows}
   </table>
   </details>
@@ -638,11 +644,19 @@ fn default_spe_source_columns(spe_columns: &[String], model: &ReportModel) -> Ve
     .collect::<Vec<_>>();
 
     for category in SPE_CATEGORY_NAMES {
-        let key = format!("{category}.est_time_pct");
-        if spe_columns.iter().any(|column| column == &key)
-            && !is_zero_or_absent_summary(&summarize_spe_category_metric(model, &key, false))
-        {
-            columns.push(key);
+        for metric in [
+            "est_time_pct",
+            "min_latency_cycles",
+            "max_latency_cycles",
+            "avg_latency_cycles",
+            "std_latency_cycles",
+        ] {
+            let key = format!("{category}.{metric}");
+            if spe_columns.iter().any(|column| column == &key)
+                && !is_zero_or_absent_summary(&summarize_spe_category_metric(model, &key, false))
+            {
+                columns.push(key);
+            }
         }
     }
 
@@ -677,7 +691,14 @@ fn displayed_spe_column_keys(model: &ReportModel) -> Vec<String> {
 }
 
 fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
-    let metrics = [("sample_pct", false), ("est_time_pct", false)];
+    let metrics = [
+        ("sample_pct", false),
+        ("est_time_pct", false),
+        ("min_latency_cycles", false),
+        ("max_latency_cycles", false),
+        ("avg_latency_cycles", false),
+        ("std_latency_cycles", false),
+    ];
     let rows = model
         .spe_cpu_category_values
         .iter()
@@ -698,8 +719,9 @@ fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> S
                     .map(|value| format!("<td>{}</td>", escape_html(&value)))
                     .collect::<Vec<_>>()
                     .join("");
+                let row_shade = cpu_row_shade(*cpu);
                 Some(format!(
-                    "<tr><td>{}</td><td><code>{}</code></td>{}</tr>",
+                    "<tr class=\"cpu-shade-{row_shade}\"><td>{}</td><td><code>{}</code></td>{}</tr>",
                     cpu,
                     escape_html(category),
                     cells
@@ -713,9 +735,13 @@ fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> S
         } else {
             "Missing"
         };
-        return format!("<tr><td colspan=\"4\">{status}</td></tr>");
+        return format!("<tr><td colspan=\"8\">{status}</td></tr>");
     }
     rows.join("\n")
+}
+
+fn cpu_row_shade(cpu: u32) -> u32 {
+    cpu % 6
 }
 
 fn is_zero_or_absent_summary(value: &str) -> bool {
@@ -744,7 +770,7 @@ fn summarize_spe_category_metric(
         }
     }
     if saw_number {
-        return format_percentage_for_summary(sum);
+        return format_metric_for_summary(key, sum);
     }
     if saw_undefined && show_na_for_undefined {
         return "N/A".to_string();
@@ -767,7 +793,7 @@ fn summarize_spe_category_metric_from_values(
     show_na_for_undefined: bool,
 ) -> String {
     match values.get(key) {
-        Some(MetricValue::Number(value)) => format_percentage_for_summary(*value),
+        Some(MetricValue::Number(value)) => format_metric_for_summary(key, *value),
         Some(MetricValue::Undefined(_)) if show_na_for_undefined => "N/A".to_string(),
         Some(MetricValue::Unresolved(_)) => "Unresolved".to_string(),
         Some(MetricValue::Missing(_)) | None => "Missing".to_string(),
@@ -775,11 +801,31 @@ fn summarize_spe_category_metric_from_values(
     }
 }
 
+fn format_metric_for_summary(key: &str, value: f64) -> String {
+    if is_percent_metric(key) {
+        format_percentage_for_summary(value)
+    } else {
+        format_number_for_summary(value)
+    }
+}
+
+fn is_percent_metric(key: &str) -> bool {
+    key.ends_with("_pct")
+}
+
 fn format_percentage_for_summary(value: f64) -> String {
     if value.abs() >= 1000.0 {
         format!("{value:.0}%")
     } else {
         format!("{value:.3}%")
+    }
+}
+
+fn format_number_for_summary(value: f64) -> String {
+    if value.abs() >= 1000.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.3}")
     }
 }
 
@@ -959,6 +1005,12 @@ fn spe_category_metric_formula(key: &str) -> &'static str {
         Some("sample_pct") => "category SPE samples / total SPE samples",
         Some("spe_latency_pct") => "category SPE latency cycles / total SPE latency cycles",
         Some("est_time_pct") => "estimated time percentage",
+        Some("min_latency_cycles") => "minimum SPE latency cycles in this category",
+        Some("max_latency_cycles") => "maximum SPE latency cycles in this category",
+        Some("avg_latency_cycles") => "average SPE latency cycles in this category",
+        Some("std_latency_cycles") => {
+            "population standard deviation of SPE latency cycles in this category"
+        }
         _ => "SPE category metric",
     }
 }
@@ -970,6 +1022,10 @@ fn spe_category_metric_meaning(key: &str) -> &'static str {
         Some("est_time_pct") => {
             "估算時間佔比；目前用此分類的 SPE latency cycles 佔整份 session SPE latency cycles 的比例。"
         }
+        Some("min_latency_cycles") => "此類 SPE sample 實測 latency cycles 最小值。",
+        Some("max_latency_cycles") => "此類 SPE sample 實測 latency cycles 最大值。",
+        Some("avg_latency_cycles") => "此類 SPE sample 實測 latency cycles 平均值。",
+        Some("std_latency_cycles") => "此類 SPE sample 實測 latency cycles 的 population standard deviation。",
         _ => "Arm SPE category decoded metric。",
     }
 }
@@ -1184,10 +1240,11 @@ mod tests {
         assert!(summary_pos < spe_summary_pos);
         assert!(spe_summary_pos < column_help_pos);
         assert!(column_help_pos < source_lines_pos);
-        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th>"));
+        assert!(html.contains("<table class=\"spe-summary-table\">"));
+        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th>"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
-        assert!(html.contains("<tr><td colspan=\"4\">Missing</td></tr>"));
+        assert!(html.contains("<tr><td colspan=\"8\">Missing</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
         assert!(html
             .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
@@ -1400,8 +1457,10 @@ mod tests {
 
         let rows = spe_category_summary_rows_html(&model, true);
 
-        assert!(rows.contains("<tr><td>0</td><td><code>load_l1</code></td>"));
-        assert!(rows.contains("<tr><td>3</td><td><code>store_dram</code></td>"));
+        assert!(rows.contains("<tr class=\"cpu-shade-0\"><td>0</td><td><code>load_l1</code></td>"));
+        assert!(
+            rows.contains("<tr class=\"cpu-shade-3\"><td>3</td><td><code>store_dram</code></td>")
+        );
         assert!(!rows.contains("spe_latency"));
         assert!(!rows.contains("load_llc"));
     }

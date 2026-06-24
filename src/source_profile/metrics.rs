@@ -584,6 +584,68 @@ pub struct SpeCategoryAggregate {
     pub sample_count: u64,
     pub latency_cycles_sum: u64,
     pub latency_sample_count: u64,
+    pub latency_cycles_square_sum: f64,
+    pub latency_cycles_min: Option<u32>,
+    pub latency_cycles_max: Option<u32>,
+}
+
+impl SpeCategoryAggregate {
+    pub fn record_latency(&mut self, latency: u32) {
+        self.latency_cycles_sum = self.latency_cycles_sum.saturating_add(u64::from(latency));
+        self.latency_sample_count = self.latency_sample_count.saturating_add(1);
+        let latency_f64 = f64::from(latency);
+        self.latency_cycles_square_sum += latency_f64 * latency_f64;
+        self.latency_cycles_min = Some(
+            self.latency_cycles_min
+                .map(|current| current.min(latency))
+                .unwrap_or(latency),
+        );
+        self.latency_cycles_max = Some(
+            self.latency_cycles_max
+                .map(|current| current.max(latency))
+                .unwrap_or(latency),
+        );
+    }
+
+    pub fn merge_from(&mut self, other: &SpeCategoryAggregate) {
+        self.sample_count = self.sample_count.saturating_add(other.sample_count);
+        self.latency_cycles_sum = self
+            .latency_cycles_sum
+            .saturating_add(other.latency_cycles_sum);
+        self.latency_sample_count = self
+            .latency_sample_count
+            .saturating_add(other.latency_sample_count);
+        self.latency_cycles_square_sum += other.latency_cycles_square_sum;
+        if let Some(value) = other.latency_cycles_min {
+            self.latency_cycles_min = Some(
+                self.latency_cycles_min
+                    .map(|current| current.min(value))
+                    .unwrap_or(value),
+            );
+        }
+        if let Some(value) = other.latency_cycles_max {
+            self.latency_cycles_max = Some(
+                self.latency_cycles_max
+                    .map(|current| current.max(value))
+                    .unwrap_or(value),
+            );
+        }
+    }
+
+    pub fn avg_latency_cycles(&self) -> Option<f64> {
+        (self.latency_sample_count > 0)
+            .then(|| self.latency_cycles_sum as f64 / self.latency_sample_count as f64)
+    }
+
+    pub fn std_latency_cycles(&self) -> Option<f64> {
+        let count = self.latency_sample_count;
+        if count == 0 {
+            return None;
+        }
+        let avg = self.latency_cycles_sum as f64 / count as f64;
+        let variance = (self.latency_cycles_square_sum / count as f64) - (avg * avg);
+        Some(variance.max(0.0).sqrt())
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -713,8 +775,7 @@ pub fn aggregate_spe_categories_by_address(
         let category_row = row.categories.entry(category).or_default();
         category_row.sample_count += 1;
         if let Some(latency) = sample.latency_cycles {
-            category_row.latency_cycles_sum += u64::from(latency);
-            category_row.latency_sample_count += 1;
+            category_row.record_latency(latency);
         }
         let cpu_category_row = row
             .cpu_categories
@@ -724,8 +785,7 @@ pub fn aggregate_spe_categories_by_address(
             .or_default();
         cpu_category_row.sample_count += 1;
         if let Some(latency) = sample.latency_cycles {
-            cpu_category_row.latency_cycles_sum += u64::from(latency);
-            cpu_category_row.latency_sample_count += 1;
+            cpu_category_row.record_latency(latency);
         }
     }
     rows
@@ -956,12 +1016,28 @@ mod tests {
             10
         );
         assert_eq!(
+            row.categories[&SpeReportCategory::LoadDram].latency_cycles_min,
+            Some(10)
+        );
+        assert_eq!(
+            row.categories[&SpeReportCategory::LoadDram].latency_cycles_max,
+            Some(10)
+        );
+        assert_eq!(
             row.categories[&SpeReportCategory::StoreUnknown].sample_count,
             1
         );
         assert_eq!(
             row.categories[&SpeReportCategory::StoreUnknown].latency_cycles_sum,
             30
+        );
+        assert_eq!(
+            row.categories[&SpeReportCategory::StoreUnknown].avg_latency_cycles(),
+            Some(30.0)
+        );
+        assert_eq!(
+            row.categories[&SpeReportCategory::StoreUnknown].std_latency_cycles(),
+            Some(0.0)
         );
     }
 

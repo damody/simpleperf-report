@@ -11,6 +11,7 @@ pub struct DecodedInstruction {
     pub operands: String,
     pub raw_line: String,
     pub class: InstructionClass,
+    pub load_kind: Option<LoadInstructionKind>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -91,6 +92,7 @@ fn parse_objdump_instruction_line(line: &str) -> Option<DecodedInstruction> {
     let mnemonic = parts.next()?.to_string();
     let operands = parts.collect::<Vec<_>>().join(" ");
     let class = classify_instruction(&mnemonic, &operands);
+    let load_kind = classify_load_instruction(&mnemonic, &operands);
 
     Some(DecodedInstruction {
         address,
@@ -98,6 +100,7 @@ fn parse_objdump_instruction_line(line: &str) -> Option<DecodedInstruction> {
         operands,
         raw_line: line.to_string(),
         class,
+        load_kind,
     })
 }
 
@@ -221,6 +224,20 @@ pub enum InstructionClass {
     Branch,
     UnknownInstruction,
     MissingInstruction,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LoadInstructionKind {
+    ScalarSingle,
+    ScalarPair,
+    SignExtend,
+    VectorSingle,
+    VectorPair,
+    Literal,
+    AtomicExclusive,
+    Acquire,
+    Prefetch,
+    Unknown,
 }
 
 pub fn classify_instruction(mnemonic: &str, operands: &str) -> InstructionClass {
@@ -349,6 +366,55 @@ pub fn classify_instruction(mnemonic: &str, operands: &str) -> InstructionClass 
     InstructionClass::UnknownInstruction
 }
 
+pub fn classify_load_instruction(mnemonic: &str, operands: &str) -> Option<LoadInstructionKind> {
+    let mnemonic = mnemonic.trim().to_ascii_lowercase();
+    let operands = operands.trim().to_ascii_lowercase();
+    let base = mnemonic.split('.').next().unwrap_or(mnemonic.as_str());
+
+    if base == "prfm" {
+        return Some(LoadInstructionKind::Prefetch);
+    }
+    if matches!(
+        base,
+        "ldxr" | "ldxrb" | "ldxrh" | "ldxp" | "ldaxr" | "ldaxrb" | "ldaxrh" | "ldaxp"
+    ) {
+        return Some(LoadInstructionKind::AtomicExclusive);
+    }
+    if matches!(
+        base,
+        "ldar" | "ldarb" | "ldarh" | "ldapr" | "ldaprb" | "ldaprh"
+    ) {
+        return Some(LoadInstructionKind::Acquire);
+    }
+    if matches!(
+        base,
+        "ldrsb" | "ldrsh" | "ldrsw" | "ldursb" | "ldursh" | "ldursw" | "ldpsw"
+    ) {
+        return Some(LoadInstructionKind::SignExtend);
+    }
+    if matches!(base, "ldp" | "ldnp") {
+        return Some(if operands_start_with_vector_register(&operands) {
+            LoadInstructionKind::VectorPair
+        } else {
+            LoadInstructionKind::ScalarPair
+        });
+    }
+    if base.starts_with("ldr") || base.starts_with("ldur") {
+        if !operands.contains('[') {
+            return Some(LoadInstructionKind::Literal);
+        }
+        return Some(if operands_start_with_vector_register(&operands) {
+            LoadInstructionKind::VectorSingle
+        } else {
+            LoadInstructionKind::ScalarSingle
+        });
+    }
+    if base.starts_with("ld") {
+        return Some(LoadInstructionKind::Unknown);
+    }
+    None
+}
+
 fn is_load_mnemonic(base: &str) -> bool {
     base.starts_with("ldr")
         || base.starts_with("ldur")
@@ -433,6 +499,47 @@ mod tests {
             classify_instruction("prfm", "pldl1keep, [x0]"),
             InstructionClass::Prefetch
         );
+    }
+
+    #[test]
+    fn classifies_detailed_load_instruction_kinds() {
+        assert_eq!(
+            classify_load_instruction("ldr", "x0, [x1]"),
+            Some(LoadInstructionKind::ScalarSingle)
+        );
+        assert_eq!(
+            classify_load_instruction("ldp", "x0, x1, [sp]"),
+            Some(LoadInstructionKind::ScalarPair)
+        );
+        assert_eq!(
+            classify_load_instruction("ldrsw", "x0, [x1]"),
+            Some(LoadInstructionKind::SignExtend)
+        );
+        assert_eq!(
+            classify_load_instruction("ldr", "q0, [x1]"),
+            Some(LoadInstructionKind::VectorSingle)
+        );
+        assert_eq!(
+            classify_load_instruction("ldp", "q0, q1, [x2]"),
+            Some(LoadInstructionKind::VectorPair)
+        );
+        assert_eq!(
+            classify_load_instruction("ldr", "x0, 0x1234"),
+            Some(LoadInstructionKind::Literal)
+        );
+        assert_eq!(
+            classify_load_instruction("ldxr", "x0, [x1]"),
+            Some(LoadInstructionKind::AtomicExclusive)
+        );
+        assert_eq!(
+            classify_load_instruction("ldapr", "x0, [x1]"),
+            Some(LoadInstructionKind::Acquire)
+        );
+        assert_eq!(
+            classify_load_instruction("prfm", "pldl1keep, [x0]"),
+            Some(LoadInstructionKind::Prefetch)
+        );
+        assert_eq!(classify_load_instruction("add", "x0, x1, x2"), None);
     }
 
     #[test]

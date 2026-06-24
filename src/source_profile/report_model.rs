@@ -578,15 +578,11 @@ fn resolve_key(
     mapping_id: u64,
     ip: u64,
 ) -> Result<Option<(PathBuf, u32, String, String)>> {
-    let Some(mapping) = bundle
-        .maps
-        .maps
-        .iter()
-        .find(|map| map.mapping_id == mapping_id)
-    else {
+    let normalized_ip = normalize_aarch64_tagged_ip(ip);
+    let Some(mapping) = resolve_mapping_for_ip(&bundle.maps.maps, mapping_id, normalized_ip) else {
         return Ok(None);
     };
-    let Some(relative_address) = relative_address_for_mapping(mapping, ip) else {
+    let Some(relative_address) = relative_address_for_mapping(mapping, normalized_ip) else {
         return Ok(None);
     };
     let Some(matched) = elf_matches.get(&mapping.module_id) else {
@@ -617,6 +613,23 @@ fn resolve_key(
         location.function.unwrap_or_default(),
         mapping.module_id.clone(),
     )))
+}
+
+fn resolve_mapping_for_ip(
+    maps: &[ProcessMapRecord],
+    mapping_id: u64,
+    ip: u64,
+) -> Option<&ProcessMapRecord> {
+    if mapping_id != 0 {
+        return maps.iter().find(|map| map.mapping_id == mapping_id);
+    }
+    maps.iter()
+        .filter(|mapping| ip >= mapping.start && ip < mapping.end)
+        .min_by_key(|mapping| mapping.end.saturating_sub(mapping.start))
+}
+
+fn normalize_aarch64_tagged_ip(ip: u64) -> u64 {
+    ip & 0x00ff_ffff_ffff_ffff
 }
 
 fn relative_address_for_mapping(mapping: &ProcessMapRecord, ip: u64) -> Option<u64> {
@@ -1400,13 +1413,11 @@ fn make_spe_category_values(
         );
         values.insert(
             format!("{name}.pmu_cycles_pct"),
-            MetricValue::Number(
-                if category == SpeReportCategory::CpuInstruction || has_samples {
-                    cpu_instruction_pmu_pct
-                } else {
-                    0.0
-                },
-            ),
+            MetricValue::Number(if has_samples {
+                cpu_instruction_pmu_pct
+            } else {
+                0.0
+            }),
         );
         values.insert(
             format!("{name}.spe_latency_pct"),
@@ -1442,7 +1453,11 @@ fn category_est_time_value(
     cpu_instruction_pmu_pct: f64,
 ) -> MetricValue {
     match category {
-        SpeReportCategory::CpuInstruction => MetricValue::Number(cpu_instruction_pmu_pct),
+        SpeReportCategory::CpuInstruction => MetricValue::Number(if has_samples {
+            cpu_instruction_pmu_pct
+        } else {
+            0.0
+        }),
         SpeReportCategory::LoadL1
         | SpeReportCategory::LoadL2
         | SpeReportCategory::LoadL3
@@ -1932,6 +1947,14 @@ mod tests {
     fn computes_spe_category_percentages_and_est_time() {
         let mut by_category = BTreeMap::new();
         by_category.insert(
+            SpeReportCategory::CpuInstruction,
+            SpeCategoryAggregate {
+                sample_count: 1,
+                latency_cycles_sum: 0,
+                latency_sample_count: 0,
+            },
+        );
+        by_category.insert(
             SpeReportCategory::LoadDram,
             SpeCategoryAggregate {
                 sample_count: 2,
@@ -1948,11 +1971,11 @@ mod tests {
             },
         );
 
-        let values = make_spe_category_values(&by_category, 3, 100, 25.0);
+        let values = make_spe_category_values(&by_category, 4, 100, 25.0);
 
         assert!(matches!(
             values.get("load_dram.sample_pct"),
-            Some(MetricValue::Number(value)) if (*value - 66.666666).abs() < 0.001
+            Some(MetricValue::Number(value)) if (*value - 50.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
             values.get("load_dram.spe_latency_pct"),
@@ -1964,7 +1987,7 @@ mod tests {
         ));
         assert!(matches!(
             values.get("store_unknown.sample_pct"),
-            Some(MetricValue::Number(value)) if (*value - 33.333333).abs() < 0.001
+            Some(MetricValue::Number(value)) if (*value - 25.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
             values.get("cpu_instruction.spe_latency_pct"),
@@ -1974,6 +1997,59 @@ mod tests {
             values.get("cpu_instruction.est_time_pct"),
             Some(MetricValue::Number(value)) if (*value - 25.0).abs() < f64::EPSILON
         ));
+    }
+
+    #[test]
+    fn cpu_instruction_est_time_is_zero_without_cpu_instruction_samples() {
+        let values = make_spe_category_values(&BTreeMap::new(), 0, 0, 100.0);
+
+        assert!(matches!(
+            values.get("cpu_instruction.sample_pct"),
+            Some(MetricValue::Number(value)) if *value == 0.0
+        ));
+        assert!(matches!(
+            values.get("cpu_instruction.pmu_cycles_pct"),
+            Some(MetricValue::Number(value)) if *value == 0.0
+        ));
+        assert!(matches!(
+            values.get("cpu_instruction.est_time_pct"),
+            Some(MetricValue::Number(value)) if *value == 0.0
+        ));
+    }
+
+    #[test]
+    fn resolves_mapping_for_tagged_spe_pc_without_mapping_id() {
+        let maps = vec![
+            ProcessMapRecord {
+                mapping_id: 1,
+                start: 0x76a800_0000,
+                end: 0x76aa00_0000,
+                permissions: "r-xp".to_string(),
+                offset: 0,
+                device: "00:00".to_string(),
+                inode: 1,
+                path: Some("/data/app/pkg/lib/arm64/libwide.so".to_string()),
+                module_id: "libwide.so".to_string(),
+                load_bias: 0,
+            },
+            ProcessMapRecord {
+                mapping_id: 2,
+                start: 0x76a8f0_0000,
+                end: 0x76a900_0000,
+                permissions: "r-xp".to_string(),
+                offset: 0,
+                device: "00:00".to_string(),
+                inode: 2,
+                path: Some("/data/app/pkg/lib/arm64/libnarrow.so".to_string()),
+                module_id: "libnarrow.so".to_string(),
+                load_bias: 0,
+            },
+        ];
+
+        let ip = normalize_aarch64_tagged_ip(0x80000076a8f50da0);
+        let mapping = resolve_mapping_for_ip(&maps, 0, ip).unwrap();
+        assert_eq!(mapping.mapping_id, 2);
+        assert_eq!(relative_address_for_mapping(mapping, ip), Some(0x50da0));
     }
 
     #[test]

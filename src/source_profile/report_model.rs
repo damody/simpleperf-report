@@ -15,7 +15,7 @@ use super::line_resolver::{
 use super::metrics::{
     aggregate_pmu_file, aggregate_spe_by_address, aggregate_spe_categories_by_address,
     compute_percentages, derive_pmu_metrics, MetricValue, PmuAddressAggregate, SpeAddressAggregate,
-    SpeAddressCategoryAggregate,
+    SpeAddressCategoryAggregate, SpeCategoryAggregate, SpeReportCategory,
 };
 use super::sample_stream::{for_each_pmu_sample, read_spe_samples, PmuSample};
 use super::schema::ProcessMapRecord;
@@ -57,6 +57,51 @@ pub const SPE_COLUMNS: &[&str] = &[
     "spe_branch_miss_rate",
     "spe_decode_errors",
 ];
+
+pub const SPE_CATEGORY_NAMES: &[&str] = &[
+    "cpu_instruction",
+    "load_l1",
+    "load_l2",
+    "load_l3",
+    "load_llc",
+    "load_dram",
+    "load_unknown",
+    "store_l1",
+    "store_l2",
+    "store_l3",
+    "store_llc",
+    "store_dram",
+    "store_unknown",
+    "branch",
+    "other",
+    "decode_unknown",
+];
+
+pub const SPE_CATEGORY_METRICS: &[&str] = &[
+    "sample_pct",
+    "pmu_cycles_pct",
+    "spe_latency_pct",
+    "est_time_pct",
+];
+
+pub fn spe_category_column_keys() -> Vec<String> {
+    let mut keys = Vec::new();
+    for category in SPE_CATEGORY_NAMES {
+        for metric in SPE_CATEGORY_METRICS {
+            keys.push(format!("{category}.{metric}"));
+        }
+    }
+    keys
+}
+
+pub fn spe_column_keys() -> Vec<String> {
+    let mut keys = SPE_COLUMNS
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect::<Vec<_>>();
+    keys.extend(spe_category_column_keys());
+    keys
+}
 
 pub fn pmu_raw_column_keys(bundle: &SourceProfileBundle) -> Vec<String> {
     let requested = &bundle.manifest.capture_options.requested_event_keys;
@@ -222,7 +267,7 @@ struct MutableLineRow {
     pmu_acc_samples: BTreeMap<String, u64>,
     pmu_sample_count: u64,
     spe: Option<SpeAddressAggregate>,
-    spe_categories: Option<SpeAddressCategoryAggregate>,
+    spe_categories: BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
     unresolved: Vec<String>,
 }
 
@@ -264,7 +309,7 @@ impl MutableLineRow {
             pmu_acc_samples: BTreeMap::new(),
             pmu_sample_count: 0,
             spe: None,
-            spe_categories: None,
+            spe_categories: BTreeMap::new(),
             unresolved: Vec::new(),
         }
     }
@@ -410,8 +455,10 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 }
                 row.function = prefer_nonempty(&row.function, function);
                 row.module = prefer_nonempty(&row.module, module);
-                row.spe_categories = category_aggregates.remove(&key);
-                row.spe = Some(aggregate);
+                if let Some(categories) = category_aggregates.remove(&key) {
+                    merge_spe_categories(row, categories);
+                }
+                merge_spe(row, aggregate);
             } else {
                 warnings.push(format!(
                     "Unresolved SPE sample mapping={} pc=0x{:x}",
@@ -994,6 +1041,48 @@ fn merge_pmu(row: &mut MutableLineRow, aggregate: PmuAddressAggregate) {
     }
 }
 
+fn merge_spe(row: &mut MutableLineRow, aggregate: SpeAddressAggregate) {
+    let row_spe = row.spe.get_or_insert_with(SpeAddressAggregate::default);
+    row_spe.sample_count = row_spe.sample_count.saturating_add(aggregate.sample_count);
+    row_spe.latency_cycles_sum = row_spe
+        .latency_cycles_sum
+        .saturating_add(aggregate.latency_cycles_sum);
+    row_spe.latency_sample_count = row_spe
+        .latency_sample_count
+        .saturating_add(aggregate.latency_sample_count);
+    row_spe.cache_hits = row_spe.cache_hits.saturating_add(aggregate.cache_hits);
+    row_spe.cache_misses = row_spe.cache_misses.saturating_add(aggregate.cache_misses);
+    row_spe.branch_correct = row_spe
+        .branch_correct
+        .saturating_add(aggregate.branch_correct);
+    row_spe.branch_mispredict = row_spe
+        .branch_mispredict
+        .saturating_add(aggregate.branch_mispredict);
+    for (source, count) in aggregate.data_source_counts {
+        *row_spe.data_source_counts.entry(source).or_default() += count;
+    }
+    row_spe.operation_flags_or |= aggregate.operation_flags_or;
+    row_spe.event_flags_or |= aggregate.event_flags_or;
+    row_spe.decode_error_count = row_spe
+        .decode_error_count
+        .saturating_add(aggregate.decode_error_count);
+}
+
+fn merge_spe_categories(row: &mut MutableLineRow, aggregate: SpeAddressCategoryAggregate) {
+    for (category, category_aggregate) in aggregate.categories {
+        let row_category = row.spe_categories.entry(category).or_default();
+        row_category.sample_count = row_category
+            .sample_count
+            .saturating_add(category_aggregate.sample_count);
+        row_category.latency_cycles_sum = row_category
+            .latency_cycles_sum
+            .saturating_add(category_aggregate.latency_cycles_sum);
+        row_category.latency_sample_count = row_category
+            .latency_sample_count
+            .saturating_add(category_aggregate.latency_sample_count);
+    }
+}
+
 fn append_cpu_coverage_diagnostic(
     bundle: &SourceProfileBundle,
     sample_count: u64,
@@ -1104,6 +1193,17 @@ fn finalize_rows(
     let raw_pmu_keys = pmu_raw_column_keys(bundle);
     let event_support = event_support_map(bundle, &raw_pmu_keys);
     let effective_seconds = effective_time_seconds(bundle);
+    let total_pmu_cycles = rows.values().map(pmu_self_weight).sum::<u64>() as f64;
+    let total_spe_samples = rows
+        .values()
+        .flat_map(|row| row.spe_categories.values())
+        .map(|category| category.sample_count)
+        .sum::<u64>();
+    let total_spe_latency_cycles = rows
+        .values()
+        .flat_map(|row| row.spe_categories.values())
+        .map(|category| category.latency_cycles_sum)
+        .sum::<u64>();
     rows.into_values()
         .map(|row| {
             let mut pmu_values = BTreeMap::new();
@@ -1129,12 +1229,16 @@ fn finalize_rows(
                 pmu_values.insert(key, value);
             }
 
-            let spe_values = make_spe_values(bundle, row.spe.as_ref());
-            let self_weight =
-                row.pmu_self
-                    .get("cpu_cycles")
-                    .copied()
-                    .unwrap_or_else(|| row.pmu_self.values().copied().sum()) as f64;
+            let self_weight = pmu_self_weight(&row) as f64;
+            let row_pmu_cycles_pct = percent(self_weight, total_pmu_cycles);
+            let spe_values = make_spe_values(
+                bundle,
+                row.spe.as_ref(),
+                &row.spe_categories,
+                total_spe_samples,
+                total_spe_latency_cycles,
+                row_pmu_cycles_pct,
+            );
             let accumulated_weight =
                 row.pmu_acc
                     .get("cpu_cycles")
@@ -1166,6 +1270,13 @@ fn finalize_rows(
         .collect()
 }
 
+fn pmu_self_weight(row: &MutableLineRow) -> u64 {
+    row.pmu_self
+        .get("cpu_cycles")
+        .copied()
+        .unwrap_or_else(|| row.pmu_self.values().copied().sum())
+}
+
 fn dense_supported_pmu_counts(
     sparse: &BTreeMap<String, u64>,
     raw_pmu_keys: &[String],
@@ -1183,12 +1294,16 @@ fn dense_supported_pmu_counts(
 fn make_spe_values(
     bundle: &SourceProfileBundle,
     aggregate: Option<&SpeAddressAggregate>,
+    by_category: &BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
+    total_spe_samples: u64,
+    total_spe_latency_cycles: u64,
+    row_pmu_cycles_pct: f64,
 ) -> BTreeMap<String, MetricValue> {
     let mut values = BTreeMap::new();
     if !bundle.manifest.lanes.spe.available {
-        for key in SPE_COLUMNS {
+        for key in spe_column_keys() {
             values.insert(
-                (*key).to_string(),
+                key,
                 MetricValue::Missing(
                     bundle
                         .manifest
@@ -1207,6 +1322,12 @@ fn make_spe_values(
         for key in SPE_COLUMNS {
             values.insert((*key).to_string(), MetricValue::Number(0.0));
         }
+        values.extend(make_spe_category_values(
+            by_category,
+            total_spe_samples,
+            total_spe_latency_cycles,
+            row_pmu_cycles_pct,
+        ));
         return values;
     };
     values.insert(
@@ -1245,7 +1366,132 @@ fn make_spe_values(
         "spe_decode_errors".to_string(),
         MetricValue::Number(aggregate.decode_error_count as f64),
     );
+    values.extend(make_spe_category_values(
+        by_category,
+        total_spe_samples,
+        total_spe_latency_cycles,
+        row_pmu_cycles_pct,
+    ));
     values
+}
+
+fn make_spe_category_values(
+    by_category: &BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
+    total_spe_samples: u64,
+    total_spe_latency_cycles: u64,
+    cpu_instruction_pmu_pct: f64,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    for (category, name) in spe_report_categories() {
+        let aggregate = by_category.get(&category);
+        let sample_count = aggregate.map(|value| value.sample_count).unwrap_or(0);
+        let latency_cycles = aggregate.map(|value| value.latency_cycles_sum).unwrap_or(0);
+        let latency_sample_count = aggregate
+            .map(|value| value.latency_sample_count)
+            .unwrap_or(0);
+        let sample_pct = percent(sample_count as f64, total_spe_samples as f64);
+        let spe_latency_pct = percent(latency_cycles as f64, total_spe_latency_cycles as f64);
+        let has_samples = sample_count > 0;
+        let has_latency = latency_sample_count > 0;
+
+        values.insert(
+            format!("{name}.sample_pct"),
+            MetricValue::Number(sample_pct),
+        );
+        values.insert(
+            format!("{name}.pmu_cycles_pct"),
+            MetricValue::Number(
+                if category == SpeReportCategory::CpuInstruction || has_samples {
+                    cpu_instruction_pmu_pct
+                } else {
+                    0.0
+                },
+            ),
+        );
+        values.insert(
+            format!("{name}.spe_latency_pct"),
+            if category == SpeReportCategory::CpuInstruction {
+                MetricValue::Undefined(
+                    "cpu_instruction time is estimated from PMU cycles".to_string(),
+                )
+            } else if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(spe_latency_pct)
+            },
+        );
+        values.insert(
+            format!("{name}.est_time_pct"),
+            category_est_time_value(
+                category,
+                has_samples,
+                has_latency,
+                spe_latency_pct,
+                cpu_instruction_pmu_pct,
+            ),
+        );
+    }
+    values
+}
+
+fn category_est_time_value(
+    category: SpeReportCategory,
+    has_samples: bool,
+    has_latency: bool,
+    spe_latency_pct: f64,
+    cpu_instruction_pmu_pct: f64,
+) -> MetricValue {
+    match category {
+        SpeReportCategory::CpuInstruction => MetricValue::Number(cpu_instruction_pmu_pct),
+        SpeReportCategory::LoadL1
+        | SpeReportCategory::LoadL2
+        | SpeReportCategory::LoadL3
+        | SpeReportCategory::LoadLlc
+        | SpeReportCategory::LoadDram
+        | SpeReportCategory::LoadUnknown
+        | SpeReportCategory::StoreL1
+        | SpeReportCategory::StoreL2
+        | SpeReportCategory::StoreL3
+        | SpeReportCategory::StoreLlc
+        | SpeReportCategory::StoreDram
+        | SpeReportCategory::StoreUnknown => {
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(spe_latency_pct)
+            }
+        }
+        SpeReportCategory::Branch | SpeReportCategory::Other | SpeReportCategory::DecodeUnknown => {
+            if has_latency {
+                MetricValue::Number(spe_latency_pct)
+            } else if has_samples {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(0.0)
+            }
+        }
+    }
+}
+
+fn spe_report_categories() -> [(SpeReportCategory, &'static str); 16] {
+    [
+        (SpeReportCategory::CpuInstruction, "cpu_instruction"),
+        (SpeReportCategory::LoadL1, "load_l1"),
+        (SpeReportCategory::LoadL2, "load_l2"),
+        (SpeReportCategory::LoadL3, "load_l3"),
+        (SpeReportCategory::LoadLlc, "load_llc"),
+        (SpeReportCategory::LoadDram, "load_dram"),
+        (SpeReportCategory::LoadUnknown, "load_unknown"),
+        (SpeReportCategory::StoreL1, "store_l1"),
+        (SpeReportCategory::StoreL2, "store_l2"),
+        (SpeReportCategory::StoreL3, "store_l3"),
+        (SpeReportCategory::StoreLlc, "store_llc"),
+        (SpeReportCategory::StoreDram, "store_dram"),
+        (SpeReportCategory::StoreUnknown, "store_unknown"),
+        (SpeReportCategory::Branch, "branch"),
+        (SpeReportCategory::Other, "other"),
+        (SpeReportCategory::DecodeUnknown, "decode_unknown"),
+    ]
 }
 
 fn compute_row_percentages(rows: &mut [ReportLineRow]) {
@@ -1664,7 +1910,7 @@ mod tests {
             pmu_acc_samples: BTreeMap::new(),
             pmu_sample_count: 2,
             spe: None,
-            spe_categories: None,
+            spe_categories: BTreeMap::new(),
             unresolved: Vec::new(),
         };
         let rows = finalize_rows(
@@ -1679,6 +1925,54 @@ mod tests {
         assert!(matches!(
             rows[0].pmu_values.get("inst_retired"),
             Some(MetricValue::Number(value)) if (*value - 0.5).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn computes_spe_category_percentages_and_est_time() {
+        let mut by_category = BTreeMap::new();
+        by_category.insert(
+            SpeReportCategory::LoadDram,
+            SpeCategoryAggregate {
+                sample_count: 2,
+                latency_cycles_sum: 60,
+                latency_sample_count: 2,
+            },
+        );
+        by_category.insert(
+            SpeReportCategory::StoreUnknown,
+            SpeCategoryAggregate {
+                sample_count: 1,
+                latency_cycles_sum: 40,
+                latency_sample_count: 1,
+            },
+        );
+
+        let values = make_spe_category_values(&by_category, 3, 100, 25.0);
+
+        assert!(matches!(
+            values.get("load_dram.sample_pct"),
+            Some(MetricValue::Number(value)) if (*value - 66.666666).abs() < 0.001
+        ));
+        assert!(matches!(
+            values.get("load_dram.spe_latency_pct"),
+            Some(MetricValue::Number(value)) if (*value - 60.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_dram.est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 60.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("store_unknown.sample_pct"),
+            Some(MetricValue::Number(value)) if (*value - 33.333333).abs() < 0.001
+        ));
+        assert!(matches!(
+            values.get("cpu_instruction.spe_latency_pct"),
+            Some(MetricValue::Undefined(_))
+        ));
+        assert!(matches!(
+            values.get("cpu_instruction.est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 25.0).abs() < f64::EPSILON
         ));
     }
 

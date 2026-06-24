@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use super::bundle::SourceProfileBundle;
-use super::report_model::{build_report_model, metric_value_text, pmu_column_keys, SPE_COLUMNS};
+use super::report_model::{
+    build_report_model, metric_value_text, pmu_column_keys, spe_column_keys,
+};
 
 pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
     if let Some(parent) = output.parent() {
@@ -154,7 +156,7 @@ fn columns(bundle: &SourceProfileBundle) -> Vec<String> {
         "acc_weight".to_string(),
     ];
     columns.extend(pmu_column_keys(bundle));
-    columns.extend(SPE_COLUMNS.iter().map(|key| (*key).to_string()));
+    columns.extend(spe_column_keys());
     columns
 }
 
@@ -181,8 +183,8 @@ fn row_to_values(
     for key in pmu_column_keys(bundle) {
         values.push(metric_value_text(row.pmu_values.get(&key)));
     }
-    for key in SPE_COLUMNS {
-        values.push(metric_value_text(row.spe_values.get(*key)));
+    for key in spe_column_keys() {
+        values.push(metric_value_text(row.spe_values.get(&key)));
     }
     values
 }

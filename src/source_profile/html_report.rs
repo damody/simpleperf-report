@@ -43,6 +43,8 @@ pub fn write_html_summary_from_model(
     let mut spe_columns = displayed_spe_column_keys(model);
     spe_columns.extend(displayed_instruction_class_column_keys(model));
     let spe_columns_json = serde_json::to_string(&spe_columns).unwrap_or_else(|_| "[]".to_string());
+    let spe_category_histograms_json = serde_json::to_string(&model.spe_cpu_category_histograms)
+        .unwrap_or_else(|_| "{}".to_string());
     let mut default_source_columns = vec![
         "file".to_string(),
         "line".to_string(),
@@ -117,6 +119,15 @@ pub fn write_html_summary_from_model(
     .spe-summary-table tbody tr.cpu-shade-3 td {{ background: #fff8fb; }}
     .spe-summary-table tbody tr.cpu-shade-4 td {{ background: #f8fbfa; }}
     .spe-summary-table tbody tr.cpu-shade-5 td {{ background: #fbf8ff; }}
+    .spe-summary-table tbody tr[data-spe-category] {{ cursor: pointer; }}
+    .spe-summary-table tbody tr.selected td {{ outline: 2px solid #2563eb; outline-offset: -2px; }}
+    .spe-histogram-panel {{ margin-top: 10px; border: 1px solid #d0d7de; padding: 10px; max-width: 920px; }}
+    .spe-histogram-title {{ font-weight: 600; margin-bottom: 8px; }}
+    .spe-histogram-row {{ display: grid; grid-template-columns: 160px minmax(120px, 1fr) 64px; align-items: center; gap: 8px; margin: 4px 0; }}
+    .spe-histogram-label {{ font-family: Consolas, monospace; font-size: 12px; }}
+    .spe-histogram-bar-track {{ height: 14px; background: #f1f5f9; border: 1px solid #d0d7de; }}
+    .spe-histogram-bar {{ height: 100%; background: #2563eb; min-width: 2px; }}
+    .spe-histogram-count {{ text-align: right; font-variant-numeric: tabular-nums; }}
     details.report-section {{ margin-top: 24px; }}
     details.report-section > summary {{ cursor: pointer; font-size: 18px; font-weight: 600; }}
     details.report-section > table,
@@ -152,6 +163,7 @@ pub fn write_html_summary_from_model(
     <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;avg*3%</th></tr>
     {spe_category_summary_rows}
   </table>
+  <div id="speCategoryHistogram" class="spe-histogram-panel">Select a SPE category row to view latency histogram.</div>
   </details>
   <details class="report-section" open>
   <summary>Instruction Class Summary</summary>
@@ -271,6 +283,7 @@ pub fn write_html_summary_from_model(
     const RAW_PMU_COLUMNS = {raw_pmu_columns_json};
     const DERIVED_PMU_COLUMNS = {derived_pmu_columns_json};
     const SPE_COLUMNS = {spe_columns_json};
+    const SPE_CATEGORY_HISTOGRAMS = {spe_category_histograms_json};
     const SOURCE_COLUMNS = [
       {{ key: "file", label: "File", cls: "col-file truncate", value: row => row.file }},
       {{ key: "line", label: "Line", cls: "col-line", value: row => row.line }},
@@ -341,6 +354,27 @@ pub fn write_html_summary_from_model(
     function resetSourcePaging() {{
       sourceOffset = 0;
       renderSourceRows();
+    }}
+    function renderSpeCategoryHistogram(row) {{
+      document.querySelectorAll(".spe-summary-table tr.selected").forEach(active => active.classList.remove("selected"));
+      row.classList.add("selected");
+      const cpu = row.dataset.speCpu;
+      const category = row.dataset.speCategory;
+      const histogram = SPE_CATEGORY_HISTOGRAMS?.[cpu]?.[category];
+      const panel = document.getElementById("speCategoryHistogram");
+      if (!histogram || !Array.isArray(histogram.bins) || histogram.bins.length === 0) {{
+        panel.innerHTML = `<div class="spe-histogram-title">CPU ${{escapeText(cpu)}} / ${{escapeText(category)}}</div><div>No latency histogram data</div>`;
+        return;
+      }}
+      const maxCount = Math.max(...histogram.bins.map(bin => Number(bin.count) || 0), 1);
+      const rows = histogram.bins.map(bin => {{
+        const count = Number(bin.count) || 0;
+        const width = Math.max(2, count / maxCount * 100);
+        const start = formatMetric(bin.start_latency_cycles);
+        const end = formatMetric(bin.end_latency_cycles);
+        return `<div class="spe-histogram-row"><div class="spe-histogram-label">${{start}}-${{end}}</div><div class="spe-histogram-bar-track"><div class="spe-histogram-bar" style="width:${{width}}%"></div></div><div class="spe-histogram-count">${{count}}</div></div>`;
+      }}).join("");
+      panel.innerHTML = `<div class="spe-histogram-title">CPU ${{escapeText(cpu)}} / ${{escapeText(category)}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})</div>${{rows}}`;
     }}
     function metricValue(row, key) {{
       return row.pmu_values?.[key] ?? row.spe_values?.[key] ?? row.instruction_values?.[key] ?? "Missing";
@@ -617,6 +651,7 @@ pub fn write_html_summary_from_model(
         raw_pmu_columns_json = raw_pmu_columns_json,
         derived_pmu_columns_json = derived_pmu_columns_json,
         spe_columns_json = spe_columns_json,
+        spe_category_histograms_json = spe_category_histograms_json,
         default_source_columns_json = default_source_columns_json,
         spe_category_summary_rows =
             spe_category_summary_rows_html(model, manifest.lanes.spe.available),
@@ -777,7 +812,9 @@ fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> S
                     .join("");
                 let row_shade = cpu_row_shade(*cpu);
                 Some(format!(
-                    "<tr class=\"cpu-shade-{row_shade}\"><td>{}</td><td><code>{}</code></td>{}</tr>",
+                    "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-category=\"{}\" onclick=\"renderSpeCategoryHistogram(this)\"><td>{}</td><td><code>{}</code></td>{}</tr>",
+                    cpu,
+                    escape_html(category),
                     cpu,
                     escape_html(category),
                     cells
@@ -1452,6 +1489,9 @@ mod tests {
         assert!(column_help_pos < source_lines_pos);
         assert!(html.contains("<table class=\"spe-summary-table\">"));
         assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;avg*3%</th>"));
+        assert!(html.contains("id=\"speCategoryHistogram\""));
+        assert!(html.contains("const SPE_CATEGORY_HISTOGRAMS = "));
+        assert!(html.contains("function renderSpeCategoryHistogram"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
         assert!(html.contains("<tr><td colspan=\"11\">Missing</td></tr>"));
@@ -1621,6 +1661,7 @@ mod tests {
             frames: Vec::new(),
             callchains: Vec::new(),
             spe_cpu_category_values: BTreeMap::new(),
+            spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
@@ -1664,15 +1705,16 @@ mod tests {
                     ]),
                 ),
             ]),
+            spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
         let rows = spe_category_summary_rows_html(&model, true);
 
-        assert!(rows.contains("<tr class=\"cpu-shade-0\"><td>0</td><td><code>load_l1</code></td>"));
+        assert!(rows.contains("<tr class=\"cpu-shade-0\" data-spe-cpu=\"0\" data-spe-category=\"load_l1\" onclick=\"renderSpeCategoryHistogram(this)\"><td>0</td><td><code>load_l1</code></td>"));
         assert!(
-            rows.contains("<tr class=\"cpu-shade-3\"><td>3</td><td><code>store_dram</code></td>")
+            rows.contains("<tr class=\"cpu-shade-3\" data-spe-cpu=\"3\" data-spe-category=\"store_dram\" onclick=\"renderSpeCategoryHistogram(this)\"><td>3</td><td><code>store_dram</code></td>")
         );
         assert!(!rows.contains("spe_latency"));
         assert!(!rows.contains("load_llc"));
@@ -1721,6 +1763,7 @@ mod tests {
                     ),
                 ]),
             )]),
+            spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
@@ -1777,6 +1820,7 @@ mod tests {
                     ),
                 ]),
             )]),
+            spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
@@ -1808,6 +1852,7 @@ mod tests {
                     ),
                 ]),
             )]),
+            spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
@@ -1831,6 +1876,7 @@ mod tests {
             frames: Vec::new(),
             callchains: Vec::new(),
             spe_cpu_category_values: BTreeMap::new(),
+            spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::from([(
                 4,
                 BTreeMap::from([
@@ -1923,6 +1969,7 @@ mod tests {
             frames: Vec::new(),
             callchains: Vec::new(),
             spe_cpu_category_values: BTreeMap::new(),
+            spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };

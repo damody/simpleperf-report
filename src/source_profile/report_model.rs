@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use object::{Object, ObjectSymbol, SymbolKind};
+use serde::Serialize;
 
 use super::bundle::SourceProfileBundle;
 use super::instruction_class::{
@@ -229,8 +230,24 @@ pub struct ReportModel {
     pub frames: Vec<ReportFrameRow>,
     pub callchains: Vec<ReportCallchainRow>,
     pub spe_cpu_category_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
+    pub spe_cpu_category_histograms: BTreeMap<u32, BTreeMap<String, SpeLatencyHistogram>>,
     pub instruction_cpu_class_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SpeLatencyHistogram {
+    pub count: u64,
+    pub min_latency_cycles: u32,
+    pub max_latency_cycles: u32,
+    pub bins: Vec<SpeLatencyHistogramBin>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SpeLatencyHistogramBin {
+    pub start_latency_cycles: u32,
+    pub end_latency_cycles: u32,
+    pub count: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -413,6 +430,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     let mut frames = Vec::new();
     let mut callchains = Vec::new();
     let mut spe_cpu_category_values = BTreeMap::new();
+    let mut spe_cpu_category_histograms = BTreeMap::new();
     let mut instruction_cpu_class_values = BTreeMap::new();
     for matched in elf_matches.values() {
         if matched.quality == ElfMatchQuality::Missing && should_warn_missing_debug_elf(matched) {
@@ -507,6 +525,8 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
             });
         spe_cpu_category_values =
             make_spe_cpu_category_values_from_address_aggregates(&category_aggregates);
+        spe_cpu_category_histograms =
+            make_spe_cpu_category_histograms_from_address_aggregates(&category_aggregates);
         instruction_cpu_class_values =
             make_instruction_cpu_class_values_from_address_aggregates(&instruction_aggregates);
         log_timing("build_model.spe_read_aggregate", phase_start.elapsed());
@@ -564,6 +584,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         frames,
         callchains,
         spe_cpu_category_values,
+        spe_cpu_category_histograms,
         instruction_cpu_class_values,
         warnings,
     })
@@ -1319,6 +1340,93 @@ fn make_spe_cpu_category_values_from_address_aggregates(
             )
         })
         .collect()
+}
+
+fn make_spe_cpu_category_histograms_from_address_aggregates(
+    address_aggregates: &BTreeMap<PmuAddressKey, SpeAddressCategoryAggregate>,
+) -> BTreeMap<u32, BTreeMap<String, SpeLatencyHistogram>> {
+    let mut cpu_categories =
+        BTreeMap::<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>::new();
+    for aggregate in address_aggregates.values() {
+        for (cpu, categories) in &aggregate.cpu_categories {
+            let cpu_category_map = cpu_categories.entry(*cpu).or_default();
+            for (category, category_aggregate) in categories {
+                let cpu_category = cpu_category_map.entry(*category).or_default();
+                cpu_category.merge_from(category_aggregate);
+            }
+        }
+    }
+    make_spe_cpu_category_histograms_from_categories(cpu_categories)
+}
+
+fn make_spe_cpu_category_histograms_from_categories(
+    cpu_categories: BTreeMap<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>,
+) -> BTreeMap<u32, BTreeMap<String, SpeLatencyHistogram>> {
+    let category_names = spe_report_categories()
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    cpu_categories
+        .into_iter()
+        .filter_map(|(cpu, categories)| {
+            let histograms = categories
+                .into_iter()
+                .filter_map(|(category, aggregate)| {
+                    let name = category_names.get(&category)?;
+                    let histogram = spe_latency_histogram(&aggregate)?;
+                    Some(((*name).to_string(), histogram))
+                })
+                .collect::<BTreeMap<_, _>>();
+            (!histograms.is_empty()).then_some((cpu, histograms))
+        })
+        .collect()
+}
+
+fn spe_latency_histogram(aggregate: &SpeCategoryAggregate) -> Option<SpeLatencyHistogram> {
+    let mut samples = aggregate.latency_cycles_samples.clone();
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    let min_latency_cycles = *samples.first()?;
+    let max_latency_cycles = *samples.last()?;
+    let bucket_count = samples.len().clamp(1, 20);
+    if min_latency_cycles == max_latency_cycles {
+        return Some(SpeLatencyHistogram {
+            count: samples.len() as u64,
+            min_latency_cycles,
+            max_latency_cycles,
+            bins: vec![SpeLatencyHistogramBin {
+                start_latency_cycles: min_latency_cycles,
+                end_latency_cycles: max_latency_cycles,
+                count: samples.len() as u64,
+            }],
+        });
+    }
+
+    let span = u64::from(max_latency_cycles) - u64::from(min_latency_cycles) + 1;
+    let width = span.div_ceil(bucket_count as u64).max(1);
+    let mut bins = (0..bucket_count)
+        .map(|index| {
+            let start = u64::from(min_latency_cycles) + index as u64 * width;
+            let end = (start + width - 1).min(u64::from(max_latency_cycles));
+            SpeLatencyHistogramBin {
+                start_latency_cycles: start as u32,
+                end_latency_cycles: end as u32,
+                count: 0,
+            }
+        })
+        .collect::<Vec<_>>();
+    for sample in samples {
+        let index = ((u64::from(sample - min_latency_cycles) / width) as usize)
+            .min(bins.len().saturating_sub(1));
+        bins[index].count = bins[index].count.saturating_add(1);
+    }
+    Some(SpeLatencyHistogram {
+        count: aggregate.latency_sample_count,
+        min_latency_cycles,
+        max_latency_cycles,
+        bins,
+    })
 }
 
 fn make_instruction_cpu_class_values(
@@ -2692,7 +2800,8 @@ mod tests {
         assert_eq!(histogram.count, 5);
         assert_eq!(histogram.min_latency_cycles, 10);
         assert_eq!(histogram.max_latency_cycles, 200);
-        assert!(histogram.bins.iter().any(|bin| bin.count == 2));
+        assert_eq!(histogram.bins.iter().map(|bin| bin.count).sum::<u64>(), 5);
+        assert!(histogram.bins.iter().any(|bin| bin.count > 1));
     }
 
     #[test]

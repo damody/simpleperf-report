@@ -482,8 +482,7 @@ mod tests {
     fn finds_android_ndk_objdump_from_sdk_root() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target/source_profile_tests/fake_android_sdk");
-        let bin = root
-            .join("ndk/29.0.13113456/toolchains/llvm/prebuilt/windows-x86_64/bin");
+        let bin = root.join("ndk/29.0.13113456/toolchains/llvm/prebuilt/windows-x86_64/bin");
         std::fs::create_dir_all(&bin).unwrap();
         let objdump = bin.join("llvm-objdump.exe");
         std::fs::write(&objdump, "").unwrap();

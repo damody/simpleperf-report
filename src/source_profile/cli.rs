@@ -133,13 +133,13 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
     );
     let shared_model =
         if args.html || args.xlsx || args.json || args.csv || args.annotated_source_out.is_some() {
-        let start = Instant::now();
-        let model = build_report_model(&bundle)?;
-        log_timing("source_command.build_report_model", start.elapsed());
-        Some(model)
-    } else {
-        None
-    };
+            let start = Instant::now();
+            let model = build_report_model(&bundle)?;
+            log_timing("source_command.build_report_model", start.elapsed());
+            Some(model)
+        } else {
+            None
+        };
 
     if args.html {
         let model = shared_model.as_ref().expect("shared model built for html");

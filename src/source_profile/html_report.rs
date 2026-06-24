@@ -149,7 +149,7 @@ pub fn write_html_summary_from_model(
   <details class="report-section" open>
   <summary>SPE Category Summary</summary>
   <table class="spe-summary-table">
-    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th></tr>
+    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;avg*3%</th></tr>
     {spe_category_summary_rows}
   </table>
   </details>
@@ -157,7 +157,7 @@ pub fn write_html_summary_from_model(
   <summary>Instruction Class Summary</summary>
   <p>Instruction classes are decoded from sampled PC opcodes. They are not root-cause inference.</p>
   <table class="spe-summary-table">
-    <tr><th>CPU</th><th>Instruction class</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th></tr>
+    <tr><th>CPU</th><th>Instruction class</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;avg*3%</th></tr>
     {instruction_class_summary_rows}
   </table>
   </details>
@@ -751,6 +751,9 @@ fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> S
         ("max_latency_cycles", false),
         ("avg_latency_cycles", false),
         ("std_latency_cycles", false),
+        ("p95_latency_cycles", false),
+        ("p99_latency_cycles", false),
+        ("over_avg_x3_pct", false),
     ];
     let rows = model
         .spe_cpu_category_values
@@ -788,7 +791,7 @@ fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> S
         } else {
             "Missing"
         };
-        return format!("<tr><td colspan=\"8\">{status}</td></tr>");
+        return format!("<tr><td colspan=\"11\">{status}</td></tr>");
     }
     rows.join("\n")
 }
@@ -801,6 +804,9 @@ fn instruction_class_summary_rows_html(model: &ReportModel) -> String {
         ("max_latency_cycles", false),
         ("avg_latency_cycles", false),
         ("std_latency_cycles", false),
+        ("p95_latency_cycles", false),
+        ("p99_latency_cycles", false),
+        ("over_avg_x3_pct", false),
     ];
     let rows = model
         .instruction_cpu_class_values
@@ -833,7 +839,7 @@ fn instruction_class_summary_rows_html(model: &ReportModel) -> String {
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
-        return "<tr><td colspan=\"8\">Missing</td></tr>".to_string();
+        return "<tr><td colspan=\"11\">Missing</td></tr>".to_string();
     }
     rows.join("\n")
 }
@@ -1171,6 +1177,15 @@ fn instruction_class_metric_formula(key: &str) -> &'static str {
         Some("std_latency_cycles") => {
             "population standard deviation of SPE latency cycles in this instruction class"
         }
+        Some("p95_latency_cycles") => {
+            "nearest-rank p95 SPE latency cycles in this instruction class"
+        }
+        Some("p99_latency_cycles") => {
+            "nearest-rank p99 SPE latency cycles in this instruction class"
+        }
+        Some("over_avg_x3_pct") => {
+            "SPE latency samples greater than three times this instruction class average / latency samples"
+        }
         _ => "instruction-class SPE metric",
     }
 }
@@ -1189,6 +1204,11 @@ fn spe_category_metric_formula(key: &str) -> &'static str {
         Some("avg_latency_cycles") => "average SPE latency cycles in this category",
         Some("std_latency_cycles") => {
             "population standard deviation of SPE latency cycles in this category"
+        }
+        Some("p95_latency_cycles") => "nearest-rank p95 SPE latency cycles in this category",
+        Some("p99_latency_cycles") => "nearest-rank p99 SPE latency cycles in this category",
+        Some("over_avg_x3_pct") => {
+            "SPE latency samples greater than three times this category average / latency samples"
         }
         _ => "SPE category metric",
     }
@@ -1211,6 +1231,11 @@ fn spe_category_metric_meaning(key: &str) -> &'static str {
         Some("max_latency_cycles") => "此類 SPE sample 實測 latency cycles 最大值。",
         Some("avg_latency_cycles") => "此類 SPE sample 實測 latency cycles 平均值。",
         Some("std_latency_cycles") => "此類 SPE sample 實測 latency cycles 的 population standard deviation。",
+        Some("p95_latency_cycles") => "此類 SPE sample latency cycles 的 nearest-rank p95。",
+        Some("p99_latency_cycles") => "此類 SPE sample latency cycles 的 nearest-rank p99。",
+        Some("over_avg_x3_pct") => {
+            "此類 SPE sample 中 latency cycles 大於該類平均值 3 倍的比例。"
+        }
         _ => "Arm SPE category decoded metric。",
     }
 }
@@ -1426,10 +1451,10 @@ mod tests {
         assert!(spe_summary_pos < column_help_pos);
         assert!(column_help_pos < source_lines_pos);
         assert!(html.contains("<table class=\"spe-summary-table\">"));
-        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th>"));
+        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;avg*3%</th>"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
-        assert!(html.contains("<tr><td colspan=\"8\">Missing</td></tr>"));
+        assert!(html.contains("<tr><td colspan=\"11\">Missing</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
         assert!(html
             .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
@@ -1704,6 +1729,94 @@ mod tests {
 
         assert!(rows.contains("<td><code>load_l1</code></td>"));
         assert!(!rows.contains("<td><code>load_llc</code></td>"));
+    }
+
+    #[test]
+    fn spe_summary_rows_include_tail_latency_metrics() {
+        let model = ReportModel {
+            rows: Vec::new(),
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::from([(
+                7,
+                BTreeMap::from([
+                    ("load_l1.sample_pct".to_string(), MetricValue::Number(100.0)),
+                    (
+                        "load_l1.est_time_pct".to_string(),
+                        MetricValue::Number(100.0),
+                    ),
+                    (
+                        "load_l1.min_latency_cycles".to_string(),
+                        MetricValue::Number(10.0),
+                    ),
+                    (
+                        "load_l1.max_latency_cycles".to_string(),
+                        MetricValue::Number(200.0),
+                    ),
+                    (
+                        "load_l1.avg_latency_cycles".to_string(),
+                        MetricValue::Number(60.0),
+                    ),
+                    (
+                        "load_l1.std_latency_cycles".to_string(),
+                        MetricValue::Number(70.0),
+                    ),
+                    (
+                        "load_l1.p95_latency_cycles".to_string(),
+                        MetricValue::Number(200.0),
+                    ),
+                    (
+                        "load_l1.p99_latency_cycles".to_string(),
+                        MetricValue::Number(200.0),
+                    ),
+                    (
+                        "load_l1.over_avg_x3_pct".to_string(),
+                        MetricValue::Number(20.0),
+                    ),
+                ]),
+            )]),
+            instruction_cpu_class_values: BTreeMap::new(),
+            warnings: Vec::new(),
+        };
+
+        let rows = spe_category_summary_rows_html(&model, true);
+
+        assert!(rows.contains("<td>200.000</td><td>200.000</td><td>20.000%</td>"));
+    }
+
+    #[test]
+    fn spe_summary_rows_are_clickable_for_histograms() {
+        let model = ReportModel {
+            rows: Vec::new(),
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::from([(
+                7,
+                BTreeMap::from([
+                    ("load_l1.sample_pct".to_string(), MetricValue::Number(100.0)),
+                    (
+                        "load_l1.est_time_pct".to_string(),
+                        MetricValue::Number(100.0),
+                    ),
+                    (
+                        "load_l1.min_latency_cycles".to_string(),
+                        MetricValue::Number(10.0),
+                    ),
+                ]),
+            )]),
+            instruction_cpu_class_values: BTreeMap::new(),
+            warnings: Vec::new(),
+        };
+
+        let rows = spe_category_summary_rows_html(&model, true);
+
+        assert!(rows.contains("data-spe-cpu=\"7\""));
+        assert!(rows.contains("data-spe-category=\"load_l1\""));
+        assert!(rows.contains("onclick=\"renderSpeCategoryHistogram"));
     }
 
     #[test]

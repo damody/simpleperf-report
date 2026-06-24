@@ -106,8 +106,57 @@ fn is_machine_code_token(text: &str) -> bool {
 }
 
 fn find_objdump() -> Option<PathBuf> {
+    for env_name in ["MPROFILER_LLVM_OBJDUMP", "LLVM_OBJDUMP"] {
+        if let Some(path) = std::env::var_os(env_name).map(PathBuf::from) {
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(path) = find_objdump_in_dirs([dir]) {
+                return Some(path);
+            }
+        }
+    }
+    if let Some(path) = find_objdump_in_path() {
+        return Some(path);
+    }
+    let ndk_roots = ["ANDROID_NDK_HOME", "ANDROID_NDK_ROOT", "NDK_HOME"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    if let Some(path) = find_objdump_in_android_ndk_roots(ndk_roots.iter().map(PathBuf::as_path)) {
+        return Some(path);
+    }
+    let mut sdk_roots = ["ANDROID_HOME", "ANDROID_SDK_ROOT"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        sdk_roots.push(PathBuf::from(local_app_data).join("Android/Sdk"));
+    }
+    if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+        sdk_roots.push(PathBuf::from(user_profile).join("AppData/Local/Android/Sdk"));
+    }
+    find_objdump_in_android_sdk_roots(sdk_roots.iter().map(PathBuf::as_path))
+}
+
+fn find_objdump_in_path() -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
+        if let Some(path) = find_objdump_in_dirs([dir.as_path()]) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn find_objdump_in_dirs<'a>(dirs: impl IntoIterator<Item = &'a Path>) -> Option<PathBuf> {
+    for dir in dirs {
         for name in ["llvm-objdump.exe", "llvm-objdump", "objdump.exe", "objdump"] {
             let candidate = dir.join(name);
             if candidate.is_file() {
@@ -116,6 +165,43 @@ fn find_objdump() -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn find_objdump_in_android_ndk_roots<'a>(
+    roots: impl IntoIterator<Item = &'a Path>,
+) -> Option<PathBuf> {
+    let mut candidates = roots
+        .into_iter()
+        .flat_map(|root| {
+            [
+                root.join("toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-objdump.exe"),
+                root.join("toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump"),
+                root.join("toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-objdump"),
+            ]
+        })
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.pop()
+}
+
+fn find_objdump_in_android_sdk_roots<'a>(
+    roots: impl IntoIterator<Item = &'a Path>,
+) -> Option<PathBuf> {
+    let mut ndk_roots = Vec::new();
+    for root in roots {
+        let ndk_root = root.join("ndk");
+        let Ok(entries) = std::fs::read_dir(&ndk_root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                ndk_roots.push(path);
+            }
+        }
+    }
+    find_objdump_in_android_ndk_roots(ndk_roots.iter().map(PathBuf::as_path))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -390,5 +476,21 @@ mod tests {
 
         assert!(index.lookup(0x2000).is_some());
         assert!(index.lookup(0x2002).is_none());
+    }
+
+    #[test]
+    fn finds_android_ndk_objdump_from_sdk_root() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/source_profile_tests/fake_android_sdk");
+        let bin = root
+            .join("ndk/29.0.13113456/toolchains/llvm/prebuilt/windows-x86_64/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let objdump = bin.join("llvm-objdump.exe");
+        std::fs::write(&objdump, "").unwrap();
+
+        assert_eq!(
+            find_objdump_in_android_sdk_roots([root.as_path()]),
+            Some(objdump)
+        );
     }
 }

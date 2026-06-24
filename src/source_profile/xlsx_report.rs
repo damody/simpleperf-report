@@ -350,12 +350,17 @@ fn write_instruction_class_sheet(
         "max_latency_cycles",
         "avg_latency_cycles",
         "std_latency_cycles",
+        "p95_latency_cycles",
+        "p99_latency_cycles",
+        ">avg*3%",
     ];
     format_basic_sheet(
         worksheet,
         1,
         (headers.len() - 1) as u16,
-        &[8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0],
+        &[
+            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0,
+        ],
     )?;
     for (col, header) in headers.iter().enumerate() {
         worksheet.write_string_with_format(0, col as u16, *header, &styles.header)?;
@@ -368,6 +373,9 @@ fn write_instruction_class_sheet(
         "max_latency_cycles",
         "avg_latency_cycles",
         "std_latency_cycles",
+        "p95_latency_cycles",
+        "p99_latency_cycles",
+        "over_avg_x3_pct",
     ];
     let mut row = 1_u32;
     for (cpu, values_by_key) in &model.instruction_cpu_class_values {

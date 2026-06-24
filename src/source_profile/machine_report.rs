@@ -10,15 +10,23 @@ use serde_json::json;
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
     build_report_model, instruction_class_column_keys, metric_value_text, pmu_column_keys,
-    spe_column_keys,
+    spe_column_keys, ReportModel,
 };
 
 pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
+    let model = build_report_model(bundle)?;
+    write_source_line_json_from_model(bundle, &model, output)
+}
+
+pub fn write_source_line_json_from_model(
+    bundle: &SourceProfileBundle,
+    model: &ReportModel,
+    output: &Path,
+) -> Result<()> {
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create '{}'", parent.display()))?;
     }
-    let model = build_report_model(bundle)?;
     let report = json!({
         "summary": {
             "session_id": bundle.manifest.session_id,
@@ -46,9 +54,17 @@ pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Re
 }
 
 pub fn write_csv_exports(bundle: &SourceProfileBundle, output_dir: &Path) -> Result<()> {
+    let model = build_report_model(bundle)?;
+    write_csv_exports_from_model(bundle, &model, output_dir)
+}
+
+pub fn write_csv_exports_from_model(
+    bundle: &SourceProfileBundle,
+    model: &ReportModel,
+    output_dir: &Path,
+) -> Result<()> {
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create '{}'", output_dir.display()))?;
-    let model = build_report_model(bundle)?;
     write_csv(
         &output_dir.join("AllLines.csv"),
         &columns(bundle),
@@ -340,5 +356,20 @@ mod tests {
             text.contains("instruction_class.compute_fp_simd.sample_pct")
                 || text.contains("instruction_values")
         );
+    }
+
+    #[test]
+    fn writes_json_and_csv_exports_from_prebuilt_model() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = build_report_model(&bundle).unwrap();
+        let out = root.join("target/source_profile_tests/machine_from_model");
+        write_source_line_json_from_model(&bundle, &model, &out.join("SourceLine.json")).unwrap();
+        write_csv_exports_from_model(&bundle, &model, &out.join("csv")).unwrap();
+
+        assert!(out.join("SourceLine.json").exists());
+        assert!(out.join("csv/AllLines.csv").exists());
+        assert!(out.join("csv/Callchains.csv").exists());
     }
 }

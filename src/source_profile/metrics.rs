@@ -588,6 +588,7 @@ pub struct SpeCategoryAggregate {
     pub latency_cycles_square_sum: f64,
     pub latency_cycles_min: Option<u32>,
     pub latency_cycles_max: Option<u32>,
+    pub latency_cycles_samples: Vec<u32>,
 }
 
 impl SpeCategoryAggregate {
@@ -606,6 +607,7 @@ impl SpeCategoryAggregate {
                 .map(|current| current.max(latency))
                 .unwrap_or(latency),
         );
+        self.latency_cycles_samples.push(latency);
     }
 
     pub fn merge_from(&mut self, other: &SpeCategoryAggregate) {
@@ -631,6 +633,8 @@ impl SpeCategoryAggregate {
                     .unwrap_or(value),
             );
         }
+        self.latency_cycles_samples
+            .extend_from_slice(&other.latency_cycles_samples);
     }
 
     pub fn avg_latency_cycles(&self) -> Option<f64> {
@@ -646,6 +650,32 @@ impl SpeCategoryAggregate {
         let avg = self.latency_cycles_sum as f64 / count as f64;
         let variance = (self.latency_cycles_square_sum / count as f64) - (avg * avg);
         Some(variance.max(0.0).sqrt())
+    }
+
+    pub fn percentile_latency_cycles(&self, percentile: f64) -> Option<f64> {
+        if self.latency_cycles_samples.is_empty() {
+            return None;
+        }
+        let mut samples = self.latency_cycles_samples.clone();
+        samples.sort_unstable();
+        let rank = ((percentile / 100.0) * samples.len() as f64).ceil() as usize;
+        let index = rank.saturating_sub(1).min(samples.len() - 1);
+        Some(f64::from(samples[index]))
+    }
+
+    pub fn over_avg_x3_pct(&self) -> Option<f64> {
+        let avg = self.avg_latency_cycles()?;
+        let sample_count = self.latency_cycles_samples.len();
+        if sample_count == 0 {
+            return None;
+        }
+        let threshold = avg * 3.0;
+        let over_count = self
+            .latency_cycles_samples
+            .iter()
+            .filter(|latency| f64::from(**latency) > threshold)
+            .count();
+        Some(over_count as f64 / sample_count as f64 * 100.0)
     }
 }
 

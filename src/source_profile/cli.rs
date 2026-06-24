@@ -10,7 +10,7 @@ use super::annotated_source::write_annotated_sources_from_model;
 use super::bundle::SourceProfileBundle;
 use super::html_report::write_html_summary_from_model;
 use super::httpd::run_httpd;
-use super::machine_report::{write_csv_exports, write_source_line_json};
+use super::machine_report::{write_csv_exports_from_model, write_source_line_json_from_model};
 use super::report_db::write_report_db_from_model;
 use super::report_launcher::write_report_launcher;
 use super::report_model::build_report_model;
@@ -131,7 +131,8 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
         path_remaps.len(),
         args.out_dir.display()
     );
-    let shared_model = if args.html || args.xlsx || args.annotated_source_out.is_some() {
+    let shared_model =
+        if args.html || args.xlsx || args.json || args.csv || args.annotated_source_out.is_some() {
         let start = Instant::now();
         let model = build_report_model(&bundle)?;
         log_timing("source_command.build_report_model", start.elapsed());
@@ -159,13 +160,15 @@ pub fn run_source_command(args: SourceArgs) -> Result<()> {
         log_timing("source_command.write_xlsx", start.elapsed());
     }
     if args.json {
+        let model = shared_model.as_ref().expect("shared model built for json");
         let start = Instant::now();
-        write_source_line_json(&bundle, &args.out_dir.join("SourceLine.json"))?;
+        write_source_line_json_from_model(&bundle, model, &args.out_dir.join("SourceLine.json"))?;
         log_timing("source_command.write_json", start.elapsed());
     }
     if args.csv {
+        let model = shared_model.as_ref().expect("shared model built for csv");
         let start = Instant::now();
-        write_csv_exports(&bundle, &args.out_dir.join("csv"))?;
+        write_csv_exports_from_model(&bundle, model, &args.out_dir.join("csv"))?;
         log_timing("source_command.write_csv", start.elapsed());
     }
     if let Some(output_dir) = &args.annotated_source_out {

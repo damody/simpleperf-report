@@ -19,9 +19,11 @@ use super::line_resolver::{
 use super::metrics::{
     aggregate_instruction_classes_by_address, aggregate_load_instruction_kinds_by_address,
     aggregate_pmu_file, aggregate_spe_by_address, aggregate_spe_categories_by_address,
-    compute_percentages, derive_pmu_metrics, InstructionClassAddressAggregate,
+    aggregate_spe_hierarchy_by_address, compute_percentages, derive_pmu_metrics,
+    hierarchy_by_cpu_from_address_aggregates, InstructionClassAddressAggregate,
     LoadInstructionAddressAggregate, MetricValue, PmuAddressAggregate, PmuAddressKey,
-    SpeAddressAggregate, SpeAddressCategoryAggregate, SpeCategoryAggregate, SpeReportCategory,
+    SpeAddressAggregate, SpeAddressCategoryAggregate, SpeCategoryAggregate,
+    SpeHierarchyParentAggregate, SpeReportCategory,
 };
 use super::sample_stream::{for_each_pmu_sample, read_spe_samples, PmuSample};
 use super::schema::ProcessMapRecord;
@@ -258,6 +260,8 @@ pub struct ReportModel {
     pub callchains: Vec<ReportCallchainRow>,
     pub spe_cpu_category_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
     pub spe_cpu_category_histograms: BTreeMap<u32, BTreeMap<String, SpeLatencyHistogram>>,
+    pub spe_hierarchical_cpu_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
+    pub spe_hierarchical_cpu_histograms: BTreeMap<u32, BTreeMap<String, SpeLatencyHistogram>>,
     pub instruction_cpu_class_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
     pub load_cpu_kind_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
     pub warnings: Vec<String>,
@@ -464,6 +468,8 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     let mut callchains = Vec::new();
     let mut spe_cpu_category_values = BTreeMap::new();
     let mut spe_cpu_category_histograms = BTreeMap::new();
+    let mut spe_hierarchical_cpu_values = BTreeMap::new();
+    let mut spe_hierarchical_cpu_histograms = BTreeMap::new();
     let mut instruction_cpu_class_values = BTreeMap::new();
     let mut load_cpu_kind_values = BTreeMap::new();
     for matched in elf_matches.values() {
@@ -547,6 +553,15 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         let aggregates = aggregate_spe_by_address(&samples);
         let mut category_aggregates = aggregate_spe_categories_by_address(&samples);
         let mut instruction_cache = InstructionIndexCache::default();
+        let hierarchy_aggregates = aggregate_spe_hierarchy_by_address(&samples, |sample| {
+            instruction_cache.classify(
+                bundle,
+                &elf_matches,
+                sample.mapping_id,
+                sample.pc,
+                &mut warnings,
+            )
+        });
         let mut instruction_aggregates =
             aggregate_instruction_classes_by_address(&samples, |sample| {
                 instruction_cache.classify(
@@ -571,6 +586,11 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
             make_spe_cpu_category_values_from_address_aggregates(&category_aggregates);
         spe_cpu_category_histograms =
             make_spe_cpu_category_histograms_from_address_aggregates(&category_aggregates);
+        let hierarchy_cpu_parents = hierarchy_by_cpu_from_address_aggregates(&hierarchy_aggregates);
+        spe_hierarchical_cpu_values =
+            make_spe_hierarchy_cpu_values_from_cpu_parents(&hierarchy_cpu_parents);
+        spe_hierarchical_cpu_histograms =
+            make_spe_hierarchy_cpu_histograms_from_cpu_parents(&hierarchy_cpu_parents);
         instruction_cpu_class_values =
             make_instruction_cpu_class_values_from_address_aggregates(&instruction_aggregates);
         load_cpu_kind_values =
@@ -634,6 +654,8 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         callchains,
         spe_cpu_category_values,
         spe_cpu_category_histograms,
+        spe_hierarchical_cpu_values,
+        spe_hierarchical_cpu_histograms,
         instruction_cpu_class_values,
         load_cpu_kind_values,
         warnings,
@@ -1468,6 +1490,118 @@ fn make_spe_cpu_category_histograms_from_categories(
                 })
                 .collect::<BTreeMap<_, _>>();
             (!histograms.is_empty()).then_some((cpu, histograms))
+        })
+        .collect()
+}
+
+fn make_spe_hierarchy_cpu_values_from_cpu_parents(
+    cpu_parents: &BTreeMap<u32, BTreeMap<SpeReportCategory, SpeHierarchyParentAggregate>>,
+) -> BTreeMap<u32, BTreeMap<String, MetricValue>> {
+    cpu_parents
+        .iter()
+        .map(|(cpu, parents)| {
+            let total_parent_samples = parents
+                .values()
+                .map(|parent| parent.aggregate.sample_count)
+                .sum::<u64>();
+            let total_parent_latency_cycles = parents
+                .values()
+                .map(|parent| parent.aggregate.latency_cycles_sum)
+                .sum::<u64>();
+            let mut values = BTreeMap::new();
+
+            for (category, parent) in parents {
+                let parent_name = spe_report_category_name(*category);
+                values.extend(make_spe_hierarchy_metric_values(
+                    parent_name,
+                    &parent.aggregate,
+                    total_parent_samples,
+                    total_parent_latency_cycles,
+                ));
+
+                for (class, child) in &parent.children {
+                    let child_name = format!("{parent_name}.{}", instruction_class_name(*class));
+                    values.extend(make_spe_hierarchy_metric_values(
+                        &child_name,
+                        child,
+                        parent.aggregate.sample_count,
+                        parent.aggregate.latency_cycles_sum,
+                    ));
+                }
+            }
+
+            (*cpu, values)
+        })
+        .collect()
+}
+
+fn make_spe_hierarchy_metric_values(
+    name: &str,
+    aggregate: &SpeCategoryAggregate,
+    total_samples: u64,
+    total_latency_cycles: u64,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    let has_samples = aggregate.sample_count > 0;
+    let has_latency = aggregate.latency_sample_count > 0;
+    let sample_pct = percent(aggregate.sample_count as f64, total_samples as f64);
+    let est_time_pct = percent(
+        aggregate.latency_cycles_sum as f64,
+        total_latency_cycles as f64,
+    );
+
+    values.insert(
+        format!("{name}.sample_pct"),
+        MetricValue::Number(sample_pct),
+    );
+    values.insert(
+        format!("{name}.spe_latency_pct"),
+        if has_samples && !has_latency {
+            MetricValue::Missing("SPE latency field unavailable".to_string())
+        } else {
+            MetricValue::Number(est_time_pct)
+        },
+    );
+    values.insert(
+        format!("{name}.est_time_pct"),
+        if has_samples && !has_latency {
+            MetricValue::Missing("SPE latency field unavailable".to_string())
+        } else {
+            MetricValue::Number(est_time_pct)
+        },
+    );
+    values.extend(spe_category_latency_metric_values(
+        name,
+        Some(aggregate),
+        Some(total_latency_cycles as f64),
+        1.0,
+    ));
+    values
+}
+
+fn make_spe_hierarchy_cpu_histograms_from_cpu_parents(
+    cpu_parents: &BTreeMap<u32, BTreeMap<SpeReportCategory, SpeHierarchyParentAggregate>>,
+) -> BTreeMap<u32, BTreeMap<String, SpeLatencyHistogram>> {
+    cpu_parents
+        .iter()
+        .filter_map(|(cpu, parents)| {
+            let mut histograms = BTreeMap::new();
+            for (category, parent) in parents {
+                let parent_name = spe_report_category_name(*category);
+                if let Some(histogram) = spe_latency_histogram(&parent.aggregate) {
+                    histograms.insert(parent_name.to_string(), histogram);
+                }
+
+                for (class, child) in &parent.children {
+                    if let Some(histogram) = spe_latency_histogram(child) {
+                        histograms.insert(
+                            format!("{parent_name}.{}", instruction_class_name(*class)),
+                            histogram,
+                        );
+                    }
+                }
+            }
+            (!histograms.is_empty()).then_some((*cpu, histograms))
         })
         .collect()
 }
@@ -2630,6 +2764,13 @@ fn spe_report_categories() -> [(SpeReportCategory, &'static str); 34] {
     ]
 }
 
+fn spe_report_category_name(category: SpeReportCategory) -> &'static str {
+    spe_report_categories()
+        .into_iter()
+        .find_map(|(candidate, name)| (candidate == category).then_some(name))
+        .unwrap_or("other_unknown")
+}
+
 fn instruction_classes() -> [(InstructionClass, &'static str); 15] {
     [
         (InstructionClass::ComputeInt, "compute_int"),
@@ -2648,6 +2789,13 @@ fn instruction_classes() -> [(InstructionClass, &'static str); 15] {
         (InstructionClass::UnknownInstruction, "unknown_instruction"),
         (InstructionClass::MissingInstruction, "missing_instruction"),
     ]
+}
+
+fn instruction_class_name(class: InstructionClass) -> &'static str {
+    instruction_classes()
+        .into_iter()
+        .find_map(|(candidate, name)| (candidate == class).then_some(name))
+        .unwrap_or("unknown_instruction")
 }
 
 fn load_instruction_kinds() -> [(LoadInstructionKind, &'static str); 10] {
@@ -3062,7 +3210,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::source_profile::metrics::PmuAddressKey;
+    use crate::source_profile::metrics::{PmuAddressKey, SpeHierarchyParentAggregate};
 
     #[test]
     fn builds_report_model_with_nonzero_minimal_rows() {
@@ -3292,6 +3440,80 @@ mod tests {
             values.get("load_l1.over_avg_est_time_pct"),
             Some(MetricValue::Number(value)) if (*value - 85.9375).abs() < f64::EPSILON
         ));
+    }
+
+    fn spe_hierarchy_parent(latencies: &[u32]) -> SpeHierarchyParentAggregate {
+        let mut aggregate = SpeCategoryAggregate::default();
+        aggregate.sample_count = latencies.len() as u64;
+        for latency in latencies {
+            aggregate.record_latency(*latency);
+        }
+        SpeHierarchyParentAggregate {
+            aggregate,
+            children: BTreeMap::new(),
+        }
+    }
+
+    fn spe_hierarchy_child(
+        parent: &mut SpeHierarchyParentAggregate,
+        class: InstructionClass,
+        latencies: &[u32],
+    ) {
+        let mut aggregate = SpeCategoryAggregate::default();
+        aggregate.sample_count = latencies.len() as u64;
+        for latency in latencies {
+            aggregate.record_latency(*latency);
+        }
+        parent.children.insert(class, aggregate);
+    }
+
+    #[test]
+    fn spe_hierarchy_child_percentages_use_parent_denominator() {
+        let mut load_l1 = spe_hierarchy_parent(&[10, 10, 20, 60]);
+        spe_hierarchy_child(&mut load_l1, InstructionClass::VectorLoad, &[60]);
+        spe_hierarchy_child(&mut load_l1, InstructionClass::ScalarLoad, &[10, 10, 20]);
+
+        let values = make_spe_hierarchy_cpu_values_from_cpu_parents(&BTreeMap::from([(
+            4,
+            BTreeMap::from([(SpeReportCategory::LoadL1, load_l1)]),
+        )]));
+        let cpu_values = values.get(&4).expect("cpu 4 hierarchy values");
+
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.sample_pct")),
+            Some(100.0)
+        );
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.vector_load.sample_pct")),
+            Some(25.0)
+        );
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.scalar_load.sample_pct")),
+            Some(75.0)
+        );
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.vector_load.est_time_pct")),
+            Some(60.0)
+        );
+    }
+
+    #[test]
+    fn spe_hierarchy_histograms_include_parent_and_child_keys() {
+        let mut compute_unknown = spe_hierarchy_parent(&[10, 10, 20, 60]);
+        spe_hierarchy_child(
+            &mut compute_unknown,
+            InstructionClass::ComputeInt,
+            &[10, 10, 20, 60],
+        );
+
+        let histograms = make_spe_hierarchy_cpu_histograms_from_cpu_parents(&BTreeMap::from([(
+            4,
+            BTreeMap::from([(SpeReportCategory::ComputeUnknown, compute_unknown)]),
+        )]));
+        let cpu_histograms = histograms.get(&4).expect("cpu 4 hierarchy histograms");
+
+        assert!(cpu_histograms.contains_key("compute_unknown"));
+        assert!(cpu_histograms.contains_key("compute_unknown.compute_int"));
     }
 
     #[test]

@@ -1016,6 +1016,12 @@ fn spe_category_metric_formula(key: &str) -> &'static str {
 }
 
 fn spe_category_metric_meaning(key: &str) -> &'static str {
+    if matches!(
+        key.rsplit_once('.').map(|(category, _)| category),
+        Some("compute_unknown")
+    ) {
+        return "SPE captured a non-load/store/branch operation. The report has not decoded the sampled instruction opcode yet, so this is the first compute bucket rather than int/FP/SIMD/crypto.";
+    }
     match key.rsplit_once('.').map(|(_, metric)| metric) {
         Some("sample_pct") => "此類 SPE sample 在整份 session 中的比例；不是時間。",
         Some("spe_latency_pct") => "此類 SPE latency cycles 佔比；沒有 latency field 時為 Missing。",
@@ -1479,5 +1485,49 @@ mod tests {
         assert!(html.contains("SourceLine Report"));
         assert!(html.contains("fixture-minimal-001"));
         assert!(html.contains("/api/source-lines"));
+    }
+
+    #[test]
+    fn html_help_explains_compute_unknown() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = ReportModel {
+            rows: vec![ReportLineRow {
+                file: "src/main.cpp".to_string(),
+                line: 7,
+                function: "Tick".to_string(),
+                module: "libgame.so".to_string(),
+                code: "Tick();".to_string(),
+                status: "ok".to_string(),
+                cpu: "0".to_string(),
+                thread: "1".to_string(),
+                sample_count: 1,
+                self_weight: 0.0,
+                accumulated_weight: 0.0,
+                p_pct: 0.0,
+                acc_p_pct: 0.0,
+                file_p_pct: 0.0,
+                file_acc_p_pct: 0.0,
+                pmu_values: BTreeMap::new(),
+                spe_values: BTreeMap::from([(
+                    "compute_unknown.sample_pct".to_string(),
+                    MetricValue::Number(100.0),
+                )]),
+                detail: String::new(),
+            }],
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::new(),
+            warnings: Vec::new(),
+        };
+        let output = root.join("target/source_profile_tests/SourceLine.compute_unknown.html");
+
+        write_html_summary_from_model(&bundle, &model, &output).unwrap();
+
+        let html = fs::read_to_string(output).unwrap();
+        assert!(html.contains("SPE captured a non-load/store/branch operation"));
     }
 }

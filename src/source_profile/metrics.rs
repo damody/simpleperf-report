@@ -959,6 +959,31 @@ mod tests {
     }
 
     #[test]
+    fn spe_other_operation_reports_compute_unknown() {
+        let sample = SpeSample {
+            flags: 0,
+            event_run_ref: 0,
+            pid: 1,
+            tid: 1,
+            cpu: 0,
+            mapping_id: 1,
+            timestamp_ns: 100,
+            pc: 0x1000,
+            latency_cycles: Some(10),
+            operation_flags: SPE_OP_OTHER,
+            event_flags: 0,
+            cache_level: 0,
+            cache_result: 0,
+            branch_result: 0,
+            data_source: 0,
+            decode_status: 0,
+            raw_packet_offset: 0,
+        };
+
+        assert_eq!(spe_category(&sample), SpeReportCategory::ComputeUnknown);
+    }
+
+    #[test]
     fn aggregates_spe_categories_by_address() {
         let samples = vec![
             SpeSample {

@@ -47,6 +47,9 @@ pub fn write_html_summary_from_model(
     let spe_columns_json = serde_json::to_string(&spe_columns).unwrap_or_else(|_| "[]".to_string());
     let spe_category_histograms_json = serde_json::to_string(&model.spe_cpu_category_histograms)
         .unwrap_or_else(|_| "{}".to_string());
+    let spe_hierarchy_histograms_json =
+        serde_json::to_string(&model.spe_hierarchical_cpu_histograms)
+            .unwrap_or_else(|_| "{}".to_string());
     let mut default_source_columns = vec![
         "file".to_string(),
         "line".to_string(),
@@ -121,7 +124,9 @@ pub fn write_html_summary_from_model(
     .spe-summary-table tbody tr.cpu-shade-3 td {{ background: #fff8fb; }}
     .spe-summary-table tbody tr.cpu-shade-4 td {{ background: #f8fbfa; }}
     .spe-summary-table tbody tr.cpu-shade-5 td {{ background: #fbf8ff; }}
-    .spe-summary-table tbody tr[data-spe-category] {{ cursor: pointer; }}
+    .spe-summary-table tbody tr[data-spe-category],
+    .spe-summary-table tbody tr[data-spe-parent] {{ cursor: pointer; }}
+    .spe-child-label {{ padding-left: 24px; }}
     .spe-summary-table tbody tr.selected td {{ outline: 2px solid #2563eb; outline-offset: -2px; }}
     .spe-histogram-panel {{ margin-top: 10px; border: 1px solid #d0d7de; padding: 10px; max-width: 920px; }}
     .spe-histogram-title {{ font-weight: 600; margin-bottom: 8px; }}
@@ -160,28 +165,13 @@ pub fn write_html_summary_from_model(
   </table>
   </details>
   <details class="report-section" open>
-  <summary>SPE Category Summary</summary>
+  <summary>SPE Hierarchical Breakdown</summary>
+  <p>SPE parent rows are CPU-relative. Child rows are relative to their parent category.</p>
   <table class="spe-summary-table">
-    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th></tr>
-    {spe_category_summary_rows}
+    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th></tr>
+    {spe_hierarchy_summary_rows}
   </table>
-  <div id="speCategoryHistogram" class="spe-histogram-panel">Select a SPE category row to view latency histogram.</div>
-  </details>
-  <details class="report-section" open>
-  <summary>Instruction Class Summary</summary>
-  <p>Instruction classes are decoded from sampled PC opcodes. They are not root-cause inference.</p>
-  <table class="spe-summary-table">
-    <tr><th>CPU</th><th>Instruction class</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th></tr>
-    {instruction_class_summary_rows}
-  </table>
-  </details>
-  <details class="report-section" open>
-  <summary>Load Instruction Summary</summary>
-  <p>Load instruction kinds are decoded from sampled PC opcodes. They are not root-cause inference.</p>
-  <table class="spe-summary-table">
-    <tr><th>CPU</th><th>Load instruction</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th></tr>
-    {load_instruction_summary_rows}
-  </table>
+  <div id="speHierarchyHistogram" class="spe-histogram-panel">Select a SPE breakdown row to view latency histogram.</div>
   </details>
   <details class="report-section" open>
   <summary>Column Help</summary>
@@ -294,6 +284,7 @@ pub fn write_html_summary_from_model(
     const DERIVED_PMU_COLUMNS = {derived_pmu_columns_json};
     const SPE_COLUMNS = {spe_columns_json};
     const SPE_CATEGORY_HISTOGRAMS = {spe_category_histograms_json};
+    const SPE_HIERARCHY_HISTOGRAMS = {spe_hierarchy_histograms_json};
     const SOURCE_COLUMNS = [
       {{ key: "file", label: "File", cls: "col-file truncate", value: row => row.file }},
       {{ key: "line", label: "Line", cls: "col-line", value: row => row.line }},
@@ -364,6 +355,30 @@ pub fn write_html_summary_from_model(
     function resetSourcePaging() {{
       sourceOffset = 0;
       renderSourceRows();
+    }}
+    function renderSpeHierarchyHistogram(row) {{
+      document.querySelectorAll(".spe-summary-table tr.selected").forEach(active => active.classList.remove("selected"));
+      row.classList.add("selected");
+      const cpu = row.dataset.speCpu;
+      const parent = row.dataset.speParent;
+      const child = row.dataset.speChild;
+      const key = child ? `${{parent}}.${{child}}` : parent;
+      const title = child ? `CPU ${{escapeText(cpu)}} / ${{escapeText(parent)}} / ${{escapeText(child)}}` : `CPU ${{escapeText(cpu)}} / ${{escapeText(parent)}}`;
+      const histogram = SPE_HIERARCHY_HISTOGRAMS?.[cpu]?.[key];
+      const panel = document.getElementById("speHierarchyHistogram");
+      if (!histogram || !Array.isArray(histogram.bins) || histogram.bins.length === 0) {{
+        panel.innerHTML = `<div class="spe-histogram-title">${{title}}</div><div>No latency histogram data</div>`;
+        return;
+      }}
+      const maxCount = Math.max(...histogram.bins.map(bin => Number(bin.count) || 0), 1);
+      const rows = histogram.bins.map(bin => {{
+        const count = Number(bin.count) || 0;
+        const width = Math.max(2, count / maxCount * 100);
+        const start = formatMetric(bin.start_latency_cycles);
+        const end = formatMetric(bin.end_latency_cycles);
+        return `<div class="spe-histogram-row"><div class="spe-histogram-label">${{start}}-${{end}}</div><div class="spe-histogram-bar-track"><div class="spe-histogram-bar" style="width:${{width}}%"></div></div><div class="spe-histogram-count">${{count}}</div></div>`;
+      }}).join("");
+      panel.innerHTML = `<div class="spe-histogram-title">${{title}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})</div>${{rows}}`;
     }}
     function renderSpeCategoryHistogram(row) {{
       document.querySelectorAll(".spe-summary-table tr.selected").forEach(active => active.classList.remove("selected"));
@@ -662,11 +677,10 @@ pub fn write_html_summary_from_model(
         derived_pmu_columns_json = derived_pmu_columns_json,
         spe_columns_json = spe_columns_json,
         spe_category_histograms_json = spe_category_histograms_json,
+        spe_hierarchy_histograms_json = spe_hierarchy_histograms_json,
         default_source_columns_json = default_source_columns_json,
-        spe_category_summary_rows =
-            spe_category_summary_rows_html(model, manifest.lanes.spe.available),
-        instruction_class_summary_rows = instruction_class_summary_rows_html(model),
-        load_instruction_summary_rows = load_instruction_summary_rows_html(model),
+        spe_hierarchy_summary_rows =
+            spe_hierarchy_summary_rows_html(model, manifest.lanes.spe.available),
         column_help_rows =
             column_help_rows(bundle, &raw_pmu_columns, &derived_pmu_columns, &spe_columns),
         quality_rows = quality_rows(bundle),
@@ -883,6 +897,99 @@ fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> S
             "Missing"
         };
         return format!("<tr><td colspan=\"12\">{status}</td></tr>");
+    }
+    rows.join("\n")
+}
+
+fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
+    let metrics = [
+        ("sample_pct", false),
+        ("est_time_pct", false),
+        ("min_latency_cycles", false),
+        ("max_latency_cycles", false),
+        ("avg_latency_cycles", false),
+        ("std_latency_cycles", false),
+        ("p95_latency_cycles", false),
+        ("p99_latency_cycles", false),
+        ("over_p95_est_time_pct", false),
+    ];
+    if !spe_available {
+        return "<tr><td colspan=\"11\">SPE samples unavailable</td></tr>".to_string();
+    }
+
+    let rows = model
+        .spe_hierarchical_cpu_values
+        .iter()
+        .flat_map(|(cpu, values_by_key)| {
+            SPE_CATEGORY_NAMES.iter().flat_map(move |parent| {
+                let parent_values = metrics
+                    .iter()
+                    .map(|(metric, show_na)| {
+                        let key = format!("{parent}.{metric}");
+                        summarize_spe_category_metric_from_values(values_by_key, &key, *show_na)
+                    })
+                    .collect::<Vec<_>>();
+                if parent_values
+                    .iter()
+                    .all(|value| is_zero_or_absent_summary(value))
+                {
+                    return Vec::new();
+                }
+
+                let row_shade = cpu_row_shade(*cpu);
+                let parent_cells = parent_values
+                    .into_iter()
+                    .map(|value| format!("<td>{}</td>", escape_html(&value)))
+                    .collect::<Vec<_>>()
+                    .join("");
+                let mut rows = vec![format!(
+                    "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"\" onclick=\"renderSpeHierarchyHistogram(this)\"><td>{}</td><td><code>{}</code></td>{}</tr>",
+                    cpu,
+                    escape_html(parent),
+                    cpu,
+                    escape_html(parent),
+                    parent_cells
+                )];
+
+                rows.extend(INSTRUCTION_CLASS_NAMES.iter().filter_map(move |child| {
+                    let child_values = metrics
+                        .iter()
+                        .map(|(metric, show_na)| {
+                            let key = format!("{parent}.{child}.{metric}");
+                            summarize_spe_category_metric_from_values(
+                                values_by_key,
+                                &key,
+                                *show_na,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    if child_values
+                        .iter()
+                        .all(|value| is_zero_or_absent_summary(value))
+                    {
+                        return None;
+                    }
+                    let cells = child_values
+                        .into_iter()
+                        .map(|value| format!("<td>{}</td>", escape_html(&value)))
+                        .collect::<Vec<_>>()
+                        .join("");
+                    Some(format!(
+                        "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"{}\" onclick=\"renderSpeHierarchyHistogram(this)\"><td>{}</td><td class=\"spe-child-label\"><code>{}</code></td>{}</tr>",
+                        cpu,
+                        escape_html(parent),
+                        escape_html(child),
+                        cpu,
+                        escape_html(child),
+                        cells
+                    ))
+                }));
+                rows
+            })
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return "<tr><td colspan=\"11\">No SPE hierarchy samples</td></tr>".to_string();
     }
     rows.join("\n")
 }
@@ -1685,7 +1792,7 @@ mod tests {
         );
         let summary_pos = html.find("<summary>Summary</summary>").unwrap();
         let spe_summary_pos = html
-            .find("<summary>SPE Category Summary</summary>")
+            .find("<summary>SPE Hierarchical Breakdown</summary>")
             .unwrap();
         let column_help_pos = html.find("<summary>Column Help</summary>").unwrap();
         let source_lines_pos = html.find("<summary>Source Lines</summary>").unwrap();
@@ -1693,13 +1800,16 @@ mod tests {
         assert!(spe_summary_pos < column_help_pos);
         assert!(column_help_pos < source_lines_pos);
         assert!(html.contains("<table class=\"spe-summary-table\">"));
-        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th>"));
-        assert!(html.contains("id=\"speCategoryHistogram\""));
-        assert!(html.contains("const SPE_CATEGORY_HISTOGRAMS = "));
-        assert!(html.contains("function renderSpeCategoryHistogram"));
+        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th>"));
+        assert!(html.contains("id=\"speHierarchyHistogram\""));
+        assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS = "));
+        assert!(html.contains("function renderSpeHierarchyHistogram"));
+        assert!(!html.contains("<summary>SPE Category Summary</summary>"));
+        assert!(!html.contains("<summary>Instruction Class Summary</summary>"));
+        assert!(!html.contains("<summary>Load Instruction Summary</summary>"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
-        assert!(html.contains("<tr><td colspan=\"12\">Missing</td></tr>"));
+        assert!(html.contains("<tr><td colspan=\"11\">SPE samples unavailable</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
         assert!(html
             .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
@@ -2090,7 +2200,131 @@ mod tests {
     }
 
     #[test]
-    fn html_contains_instruction_class_summary() {
+    fn html_renders_spe_hierarchy_rows_with_clickable_histograms() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = ReportModel {
+            rows: Vec::new(),
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::new(),
+            spe_cpu_category_histograms: BTreeMap::new(),
+            spe_hierarchical_cpu_values: BTreeMap::from([(
+                4,
+                BTreeMap::from([
+                    ("load_l1.sample_pct".to_string(), MetricValue::Number(100.0)),
+                    (
+                        "load_l1.est_time_pct".to_string(),
+                        MetricValue::Number(100.0),
+                    ),
+                    (
+                        "load_l1.min_latency_cycles".to_string(),
+                        MetricValue::Number(10.0),
+                    ),
+                    (
+                        "load_l1.max_latency_cycles".to_string(),
+                        MetricValue::Number(80.0),
+                    ),
+                    (
+                        "load_l1.avg_latency_cycles".to_string(),
+                        MetricValue::Number(45.0),
+                    ),
+                    (
+                        "load_l1.std_latency_cycles".to_string(),
+                        MetricValue::Number(20.0),
+                    ),
+                    (
+                        "load_l1.p95_latency_cycles".to_string(),
+                        MetricValue::Number(80.0),
+                    ),
+                    (
+                        "load_l1.p99_latency_cycles".to_string(),
+                        MetricValue::Number(80.0),
+                    ),
+                    (
+                        "load_l1.over_p95_est_time_pct".to_string(),
+                        MetricValue::Number(25.0),
+                    ),
+                    (
+                        "load_l1.vector_load.sample_pct".to_string(),
+                        MetricValue::Number(60.0),
+                    ),
+                    (
+                        "load_l1.vector_load.est_time_pct".to_string(),
+                        MetricValue::Number(70.0),
+                    ),
+                    (
+                        "load_l1.vector_load.min_latency_cycles".to_string(),
+                        MetricValue::Number(30.0),
+                    ),
+                    (
+                        "load_l1.vector_load.max_latency_cycles".to_string(),
+                        MetricValue::Number(80.0),
+                    ),
+                    (
+                        "load_l1.vector_load.avg_latency_cycles".to_string(),
+                        MetricValue::Number(55.0),
+                    ),
+                    (
+                        "load_l1.vector_load.std_latency_cycles".to_string(),
+                        MetricValue::Number(15.0),
+                    ),
+                    (
+                        "load_l1.vector_load.p95_latency_cycles".to_string(),
+                        MetricValue::Number(80.0),
+                    ),
+                    (
+                        "load_l1.vector_load.p99_latency_cycles".to_string(),
+                        MetricValue::Number(80.0),
+                    ),
+                    (
+                        "load_l1.vector_load.over_p95_est_time_pct".to_string(),
+                        MetricValue::Number(30.0),
+                    ),
+                ]),
+            )]),
+            spe_hierarchical_cpu_histograms: BTreeMap::from([(
+                4,
+                BTreeMap::from([(
+                    "load_l1.vector_load".to_string(),
+                    super::super::report_model::SpeLatencyHistogram {
+                        count: 2,
+                        min_latency_cycles: 30,
+                        max_latency_cycles: 80,
+                        bins: vec![super::super::report_model::SpeLatencyHistogramBin {
+                            start_latency_cycles: 30,
+                            end_latency_cycles: 80,
+                            count: 2,
+                        }],
+                    },
+                )]),
+            )]),
+            instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
+            warnings: Vec::new(),
+        };
+
+        let rows = spe_hierarchy_summary_rows_html(&model, true);
+
+        assert!(rows.contains("data-spe-parent=\"load_l1\" data-spe-child=\"\""));
+        assert!(rows.contains("data-spe-parent=\"load_l1\" data-spe-child=\"vector_load\""));
+        assert!(rows.contains("onclick=\"renderSpeHierarchyHistogram(this)\""));
+        assert!(rows.contains("class=\"spe-child-label\""));
+
+        let output = root.join("target/source_profile_tests/SourceLine.spe_hierarchy.html");
+        write_html_summary_from_model(&bundle, &model, &output).unwrap();
+
+        let html = fs::read_to_string(output).unwrap();
+        assert!(html.contains("<summary>SPE Hierarchical Breakdown</summary>"));
+        assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS ="));
+        assert!(html.contains("function renderSpeHierarchyHistogram"));
+    }
+
+    #[test]
+    fn html_omits_legacy_instruction_class_summary_section() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
             SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
@@ -2141,13 +2375,13 @@ mod tests {
         write_html_summary_from_model(&bundle, &model, &output).unwrap();
 
         let html = fs::read_to_string(output).unwrap();
-        assert!(html.contains("<summary>Instruction Class Summary</summary>"));
-        assert!(html.contains("<code>compute_fp_simd</code>"));
-        assert!(html.contains("Instruction classes are decoded from sampled PC opcodes"));
+        assert!(html.contains("<summary>SPE Hierarchical Breakdown</summary>"));
+        assert!(!html.contains("<summary>Instruction Class Summary</summary>"));
+        assert!(!html.contains("Instruction classes are decoded from sampled PC opcodes"));
     }
 
     #[test]
-    fn html_contains_load_instruction_summary() {
+    fn html_omits_legacy_load_instruction_summary_section() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
             SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
@@ -2198,9 +2432,9 @@ mod tests {
         write_html_summary_from_model(&bundle, &model, &output).unwrap();
 
         let html = fs::read_to_string(output).unwrap();
-        assert!(html.contains("<summary>Load Instruction Summary</summary>"));
-        assert!(html.contains("<code>load_scalar_single</code>"));
-        assert!(html.contains("Load instruction kinds are decoded from sampled PC opcodes"));
+        assert!(html.contains("<summary>SPE Hierarchical Breakdown</summary>"));
+        assert!(!html.contains("<summary>Load Instruction Summary</summary>"));
+        assert!(!html.contains("Load instruction kinds are decoded from sampled PC opcodes"));
     }
 
     #[test]

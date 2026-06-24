@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use super::instruction_class::InstructionClass;
 use super::sample_stream::{for_each_pmu_sample, PmuSample, SampleStreamHeader, SpeSample};
 use super::schema::SourceProfileEventCatalog;
 
@@ -655,6 +656,13 @@ pub struct SpeAddressCategoryAggregate {
     pub cpu_categories: BTreeMap<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct InstructionClassAddressAggregate {
+    pub sample_count: u64,
+    pub classes: BTreeMap<InstructionClass, SpeCategoryAggregate>,
+    pub cpu_classes: BTreeMap<u32, BTreeMap<InstructionClass, SpeCategoryAggregate>>,
+}
+
 pub fn aggregate_spe_by_address(
     samples: &[SpeSample],
 ) -> BTreeMap<PmuAddressKey, SpeAddressAggregate> {
@@ -786,6 +794,39 @@ pub fn aggregate_spe_categories_by_address(
         cpu_category_row.sample_count += 1;
         if let Some(latency) = sample.latency_cycles {
             cpu_category_row.record_latency(latency);
+        }
+    }
+    rows
+}
+
+pub fn aggregate_instruction_classes_by_address(
+    samples: &[SpeSample],
+    mut classify: impl FnMut(&SpeSample) -> InstructionClass,
+) -> BTreeMap<PmuAddressKey, InstructionClassAddressAggregate> {
+    let mut rows = BTreeMap::new();
+    for sample in samples {
+        let key = PmuAddressKey {
+            mapping_id: sample.mapping_id,
+            ip: sample.pc,
+        };
+        let class = classify(sample);
+        let row: &mut InstructionClassAddressAggregate = rows.entry(key).or_default();
+        row.sample_count = row.sample_count.saturating_add(1);
+        let class_row = row.classes.entry(class).or_default();
+        class_row.sample_count = class_row.sample_count.saturating_add(1);
+        if let Some(latency) = sample.latency_cycles {
+            class_row.record_latency(latency);
+        }
+
+        let cpu_class_row = row
+            .cpu_classes
+            .entry(sample.cpu)
+            .or_default()
+            .entry(class)
+            .or_default();
+        cpu_class_row.sample_count = cpu_class_row.sample_count.saturating_add(1);
+        if let Some(latency) = sample.latency_cycles {
+            cpu_class_row.record_latency(latency);
         }
     }
     rows
@@ -1063,6 +1104,75 @@ mod tests {
         assert_eq!(
             row.categories[&SpeReportCategory::StoreUnknown].std_latency_cycles(),
             Some(0.0)
+        );
+    }
+
+    #[test]
+    fn aggregates_instruction_classes_by_address() {
+        let samples = vec![
+            SpeSample {
+                flags: 0,
+                event_run_ref: 0,
+                pid: 1,
+                tid: 10,
+                cpu: 4,
+                mapping_id: 7,
+                timestamp_ns: 100,
+                pc: 0x1000,
+                latency_cycles: Some(20),
+                operation_flags: SPE_OP_OTHER,
+                event_flags: 0,
+                cache_level: 0,
+                cache_result: 0,
+                branch_result: 0,
+                data_source: 0,
+                decode_status: 0,
+                raw_packet_offset: 0,
+            },
+            SpeSample {
+                flags: 0,
+                event_run_ref: 0,
+                pid: 1,
+                tid: 11,
+                cpu: 4,
+                mapping_id: 7,
+                timestamp_ns: 110,
+                pc: 0x1004,
+                latency_cycles: Some(40),
+                operation_flags: SPE_OP_LOAD,
+                event_flags: 0,
+                cache_level: 0,
+                cache_result: 0,
+                branch_result: 0,
+                data_source: 0,
+                decode_status: 0,
+                raw_packet_offset: 8,
+            },
+        ];
+        let rows = aggregate_instruction_classes_by_address(&samples, |sample| match sample.pc {
+            0x1000 => InstructionClass::ComputeFpSimd,
+            0x1004 => InstructionClass::VectorLoad,
+            _ => InstructionClass::MissingInstruction,
+        });
+        let row = rows
+            .get(&PmuAddressKey {
+                mapping_id: 7,
+                ip: 0x1000,
+            })
+            .unwrap();
+
+        assert_eq!(row.sample_count, 1);
+        assert_eq!(
+            row.classes[&InstructionClass::ComputeFpSimd].sample_count,
+            1
+        );
+        assert_eq!(
+            row.classes[&InstructionClass::ComputeFpSimd].latency_cycles_sum,
+            20
+        );
+        assert_eq!(
+            row.cpu_classes[&4][&InstructionClass::ComputeFpSimd].latency_cycles_sum,
+            20
         );
     }
 

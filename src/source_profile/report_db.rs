@@ -61,13 +61,14 @@ pub fn write_report_db_from_model(
             "INSERT INTO source_lines(
                 file, line, function, module, cpu, thread, status, code, detail,
                 sample_count, self_weight, accumulated_weight, p_pct, acc_p_pct, file_p_pct, file_acc_p_pct,
-                cpi, l1d_cache_hit_rate, mips, mcps, pmu_json, spe_json, instruction_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                cpi, l1d_cache_hit_rate, mips, mcps, pmu_json, spe_json, instruction_json, load_instruction_json
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         )?;
         for row in &model.rows {
             let pmu_json = metric_map_json(&row.pmu_values)?;
             let spe_json = metric_map_json(&row.spe_values)?;
             let instruction_json = metric_map_json(&row.instruction_values)?;
+            let load_instruction_json = metric_map_json(&row.load_instruction_values)?;
             stmt.execute(params![
                 row.file,
                 row.line,
@@ -92,6 +93,7 @@ pub fn write_report_db_from_model(
                 pmu_json,
                 spe_json,
                 instruction_json,
+                load_instruction_json,
             ])?;
         }
     }
@@ -175,7 +177,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             mcps TEXT NOT NULL,
             pmu_json TEXT NOT NULL,
             spe_json TEXT NOT NULL,
-            instruction_json TEXT NOT NULL
+            instruction_json TEXT NOT NULL,
+            load_instruction_json TEXT NOT NULL
         );
 
         CREATE TABLE files(
@@ -345,6 +348,30 @@ mod tests {
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM pragma_table_info('source_lines') WHERE name = 'instruction_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn sqlite_schema_includes_load_instruction_json() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let output =
+            root.join("target/source_profile_tests/report_db_load_instruction/SourceLine.sqlite");
+        if output.exists() {
+            fs::remove_file(&output).unwrap();
+        }
+
+        write_report_db(&bundle, &output).unwrap();
+
+        let conn = Connection::open(output).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM pragma_table_info('source_lines') WHERE name = 'load_instruction_json'",
                 [],
                 |row| row.get(0),
             )

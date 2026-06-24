@@ -7,8 +7,9 @@ use rust_xlsxwriter::{Color, Format, FormatAlign, Workbook, Worksheet};
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, instruction_class_column_keys, metric_value_number, metric_value_text,
-    pmu_column_keys, spe_column_keys, ReportModel, INSTRUCTION_CLASS_NAMES,
+    build_report_model, instruction_class_column_keys, load_instruction_column_keys,
+    metric_value_number, metric_value_text, pmu_column_keys, spe_column_keys, ReportModel,
+    INSTRUCTION_CLASS_NAMES, LOAD_INSTRUCTION_KIND_NAMES,
 };
 use super::source_loader::{load_source_file, SourceLine};
 use super::summary::SourceReportSummary;
@@ -208,6 +209,10 @@ pub fn write_summary_workbook_from_model(
     instruction_class.set_name("InstructionClass")?;
     write_instruction_class_sheet(instruction_class, model, &styles)?;
 
+    let load_instruction = workbook.add_worksheet();
+    load_instruction.set_name("LoadInstruction")?;
+    write_load_instruction_sheet(load_instruction, model, &styles)?;
+
     let column_help = workbook.add_worksheet();
     column_help.set_name("Column Help")?;
     write_column_help_sheet(column_help, &styles)?;
@@ -286,6 +291,8 @@ fn write_line_sheet(
     headers.extend(spe_columns.iter().map(String::as_str));
     let instruction_columns = instruction_class_column_keys();
     headers.extend(instruction_columns.iter().map(String::as_str));
+    let load_instruction_columns = load_instruction_column_keys();
+    headers.extend(load_instruction_columns.iter().map(String::as_str));
     let widths = vec![
         48.0, 8.0, 28.0, 20.0, 10.0, 14.0, 96.0, 18.0, 10.0, 10.0, 10.0, 12.0, 14.0, 18.0,
     ];
@@ -327,6 +334,16 @@ fn write_line_sheet(
                 row,
                 col,
                 line.instruction_values.get(key),
+                styles,
+            )?;
+            col += 1;
+        }
+        for key in &load_instruction_columns {
+            write_metric_cell(
+                worksheet,
+                row,
+                col,
+                line.load_instruction_values.get(key),
                 styles,
             )?;
             col += 1;
@@ -391,6 +408,75 @@ fn write_instruction_class_sheet(
             worksheet.write_string(row, 1, *class)?;
             for (offset, metric) in metrics.iter().enumerate() {
                 let key = format!("instruction_class.{class}.{metric}");
+                write_metric_cell(
+                    worksheet,
+                    row,
+                    (offset + 2) as u16,
+                    values_by_key.get(&key),
+                    styles,
+                )?;
+            }
+            row += 1;
+        }
+    }
+    Ok(())
+}
+
+fn write_load_instruction_sheet(
+    worksheet: &mut Worksheet,
+    model: &ReportModel,
+    styles: &WorkbookStyles,
+) -> Result<()> {
+    let headers = [
+        "CPU",
+        "Load instruction",
+        "sample%",
+        "est_time%",
+        "min_latency_cycles",
+        "max_latency_cycles",
+        "avg_latency_cycles",
+        "std_latency_cycles",
+        "p95_latency_cycles",
+        "p99_latency_cycles",
+        ">avg*3%",
+    ];
+    format_basic_sheet(
+        worksheet,
+        1,
+        (headers.len() - 1) as u16,
+        &[
+            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0,
+        ],
+    )?;
+    for (col, header) in headers.iter().enumerate() {
+        worksheet.write_string_with_format(0, col as u16, *header, &styles.header)?;
+    }
+
+    let metrics = [
+        "sample_pct",
+        "est_time_pct",
+        "min_latency_cycles",
+        "max_latency_cycles",
+        "avg_latency_cycles",
+        "std_latency_cycles",
+        "p95_latency_cycles",
+        "p99_latency_cycles",
+        "over_avg_x3_pct",
+    ];
+    let mut row = 1_u32;
+    for (cpu, values_by_key) in &model.load_cpu_kind_values {
+        for kind in LOAD_INSTRUCTION_KIND_NAMES {
+            let has_value = metrics.iter().any(|metric| {
+                let key = format!("load_instruction.{kind}.{metric}");
+                metric_value_number(values_by_key.get(&key)).is_some_and(|value| value != 0.0)
+            });
+            if !has_value {
+                continue;
+            }
+            worksheet.write_number(row, 0, f64::from(*cpu))?;
+            worksheet.write_string(row, 1, *kind)?;
+            for (offset, metric) in metrics.iter().enumerate() {
+                let key = format!("load_instruction.{kind}.{metric}");
                 write_metric_cell(
                     worksheet,
                     row,

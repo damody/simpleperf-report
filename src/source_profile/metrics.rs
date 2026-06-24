@@ -541,22 +541,40 @@ pub const SPE_OP_OTHER: u32 = 1 << 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SpeReportCategory {
-    CpuInstruction,
     LoadL1,
     LoadL2,
     LoadL3,
     LoadLlc,
     LoadDram,
+    LoadRemote,
+    LoadIo,
     LoadUnknown,
     StoreL1,
     StoreL2,
     StoreL3,
     StoreLlc,
     StoreDram,
+    StoreRemote,
+    StoreIo,
     StoreUnknown,
-    Branch,
-    Other,
+    AtomicL1,
+    AtomicL2,
+    AtomicL3,
+    AtomicDram,
+    AtomicUnknown,
+    BranchHit,
+    BranchMiss,
+    BranchUnknown,
+    ComputeInt,
+    ComputeFpSimd,
+    ComputeCrypto,
+    ComputeUnknown,
+    FrontendOrDecode,
+    SystemInstruction,
+    ExceptionOrTrap,
     DecodeUnknown,
+    DataSourceUnknown,
+    OtherUnknown,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -615,35 +633,64 @@ pub fn spe_category(sample: &SpeSample) -> SpeReportCategory {
     if sample.decode_status != 0 {
         return SpeReportCategory::DecodeUnknown;
     }
+    if sample.operation_flags & (SPE_OP_LOAD | SPE_OP_STORE) == (SPE_OP_LOAD | SPE_OP_STORE) {
+        return atomic_category(sample.data_source);
+    }
     if sample.operation_flags & SPE_OP_LOAD != 0 {
-        return match sample.data_source {
-            u16::MAX => SpeReportCategory::LoadUnknown,
-            0x00 => SpeReportCategory::LoadL1,
-            0x08 => SpeReportCategory::LoadL2,
-            0x09 | 0x0a => SpeReportCategory::LoadL3,
-            0x0b => SpeReportCategory::LoadLlc,
-            0x0e => SpeReportCategory::LoadDram,
-            _ => SpeReportCategory::LoadUnknown,
-        };
+        return load_category(sample.data_source);
     }
     if sample.operation_flags & SPE_OP_STORE != 0 {
-        return match sample.data_source {
-            u16::MAX => SpeReportCategory::StoreUnknown,
-            0x00 => SpeReportCategory::StoreL1,
-            0x08 => SpeReportCategory::StoreL2,
-            0x09 | 0x0a => SpeReportCategory::StoreL3,
-            0x0b => SpeReportCategory::StoreLlc,
-            0x0e => SpeReportCategory::StoreDram,
-            _ => SpeReportCategory::StoreUnknown,
-        };
+        return store_category(sample.data_source);
     }
     if sample.operation_flags & SPE_OP_BRANCH != 0 {
-        return SpeReportCategory::Branch;
+        return match sample.branch_result {
+            1 => SpeReportCategory::BranchHit,
+            2 => SpeReportCategory::BranchMiss,
+            _ => SpeReportCategory::BranchUnknown,
+        };
     }
     if sample.operation_flags & SPE_OP_OTHER != 0 {
-        return SpeReportCategory::Other;
+        return SpeReportCategory::ComputeUnknown;
     }
-    SpeReportCategory::CpuInstruction
+    SpeReportCategory::OtherUnknown
+}
+
+fn load_category(data_source: u16) -> SpeReportCategory {
+    match data_source {
+        u16::MAX => SpeReportCategory::LoadUnknown,
+        0x00 => SpeReportCategory::LoadL1,
+        0x08 => SpeReportCategory::LoadL2,
+        0x09 | 0x0a => SpeReportCategory::LoadL3,
+        0x0b => SpeReportCategory::LoadLlc,
+        0x0c => SpeReportCategory::LoadRemote,
+        0x0d | 0x0f => SpeReportCategory::LoadIo,
+        0x0e => SpeReportCategory::LoadDram,
+        _ => SpeReportCategory::LoadUnknown,
+    }
+}
+
+fn store_category(data_source: u16) -> SpeReportCategory {
+    match data_source {
+        u16::MAX => SpeReportCategory::StoreUnknown,
+        0x00 => SpeReportCategory::StoreL1,
+        0x08 => SpeReportCategory::StoreL2,
+        0x09 | 0x0a => SpeReportCategory::StoreL3,
+        0x0b => SpeReportCategory::StoreLlc,
+        0x0c => SpeReportCategory::StoreRemote,
+        0x0d | 0x0f => SpeReportCategory::StoreIo,
+        0x0e => SpeReportCategory::StoreDram,
+        _ => SpeReportCategory::StoreUnknown,
+    }
+}
+
+fn atomic_category(data_source: u16) -> SpeReportCategory {
+    match data_source {
+        0x00 => SpeReportCategory::AtomicL1,
+        0x08 => SpeReportCategory::AtomicL2,
+        0x09 | 0x0a | 0x0b => SpeReportCategory::AtomicL3,
+        0x0e => SpeReportCategory::AtomicDram,
+        _ => SpeReportCategory::AtomicUnknown,
+    }
 }
 
 pub fn aggregate_spe_categories_by_address(

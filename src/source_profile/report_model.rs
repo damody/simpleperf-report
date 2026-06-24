@@ -59,30 +59,43 @@ pub const SPE_COLUMNS: &[&str] = &[
 ];
 
 pub const SPE_CATEGORY_NAMES: &[&str] = &[
-    "cpu_instruction",
     "load_l1",
     "load_l2",
     "load_l3",
     "load_llc",
     "load_dram",
+    "load_remote",
+    "load_io",
     "load_unknown",
     "store_l1",
     "store_l2",
     "store_l3",
     "store_llc",
     "store_dram",
+    "store_remote",
+    "store_io",
     "store_unknown",
-    "branch",
-    "other",
+    "atomic_l1",
+    "atomic_l2",
+    "atomic_l3",
+    "atomic_dram",
+    "atomic_unknown",
+    "branch_hit",
+    "branch_miss",
+    "branch_unknown",
+    "compute_int",
+    "compute_fp_simd",
+    "compute_crypto",
+    "compute_unknown",
+    "frontend_or_decode",
+    "system_instruction",
+    "exception_or_trap",
     "decode_unknown",
+    "data_source_unknown",
+    "other_unknown",
 ];
 
-pub const SPE_CATEGORY_METRICS: &[&str] = &[
-    "sample_pct",
-    "pmu_cycles_pct",
-    "spe_latency_pct",
-    "est_time_pct",
-];
+pub const SPE_CATEGORY_METRICS: &[&str] = &["sample_pct", "spe_latency_pct", "est_time_pct"];
 
 pub fn spe_category_column_keys() -> Vec<String> {
     let mut keys = Vec::new();
@@ -1206,7 +1219,6 @@ fn finalize_rows(
     let raw_pmu_keys = pmu_raw_column_keys(bundle);
     let event_support = event_support_map(bundle, &raw_pmu_keys);
     let effective_seconds = effective_time_seconds(bundle);
-    let total_pmu_cycles = rows.values().map(pmu_self_weight).sum::<u64>() as f64;
     let total_spe_samples = rows
         .values()
         .flat_map(|row| row.spe_categories.values())
@@ -1242,16 +1254,14 @@ fn finalize_rows(
                 pmu_values.insert(key, value);
             }
 
-            let self_weight = pmu_self_weight(&row) as f64;
-            let row_pmu_cycles_pct = percent(self_weight, total_pmu_cycles);
             let spe_values = make_spe_values(
                 bundle,
                 row.spe.as_ref(),
                 &row.spe_categories,
                 total_spe_samples,
                 total_spe_latency_cycles,
-                row_pmu_cycles_pct,
             );
+            let self_weight = pmu_self_weight(&row) as f64;
             let accumulated_weight =
                 row.pmu_acc
                     .get("cpu_cycles")
@@ -1310,7 +1320,6 @@ fn make_spe_values(
     by_category: &BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
     total_spe_samples: u64,
     total_spe_latency_cycles: u64,
-    row_pmu_cycles_pct: f64,
 ) -> BTreeMap<String, MetricValue> {
     let mut values = BTreeMap::new();
     if !bundle.manifest.lanes.spe.available {
@@ -1339,7 +1348,6 @@ fn make_spe_values(
             by_category,
             total_spe_samples,
             total_spe_latency_cycles,
-            row_pmu_cycles_pct,
         ));
         return values;
     };
@@ -1383,7 +1391,6 @@ fn make_spe_values(
         by_category,
         total_spe_samples,
         total_spe_latency_cycles,
-        row_pmu_cycles_pct,
     ));
     values
 }
@@ -1392,7 +1399,6 @@ fn make_spe_category_values(
     by_category: &BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
     total_spe_samples: u64,
     total_spe_latency_cycles: u64,
-    cpu_instruction_pmu_pct: f64,
 ) -> BTreeMap<String, MetricValue> {
     let mut values = BTreeMap::new();
     for (category, name) in spe_report_categories() {
@@ -1412,20 +1418,8 @@ fn make_spe_category_values(
             MetricValue::Number(sample_pct),
         );
         values.insert(
-            format!("{name}.pmu_cycles_pct"),
-            MetricValue::Number(if has_samples {
-                cpu_instruction_pmu_pct
-            } else {
-                0.0
-            }),
-        );
-        values.insert(
             format!("{name}.spe_latency_pct"),
-            if category == SpeReportCategory::CpuInstruction {
-                MetricValue::Undefined(
-                    "cpu_instruction time is estimated from PMU cycles".to_string(),
-                )
-            } else if has_samples && !has_latency {
+            if has_samples && !has_latency {
                 MetricValue::Missing("SPE latency field unavailable".to_string())
             } else {
                 MetricValue::Number(spe_latency_pct)
@@ -1433,79 +1427,60 @@ fn make_spe_category_values(
         );
         values.insert(
             format!("{name}.est_time_pct"),
-            category_est_time_value(
-                category,
-                has_samples,
-                has_latency,
-                spe_latency_pct,
-                cpu_instruction_pmu_pct,
-            ),
+            category_est_time_value(has_samples, has_latency, spe_latency_pct),
         );
     }
     values
 }
 
 fn category_est_time_value(
-    category: SpeReportCategory,
     has_samples: bool,
     has_latency: bool,
     spe_latency_pct: f64,
-    cpu_instruction_pmu_pct: f64,
 ) -> MetricValue {
-    match category {
-        SpeReportCategory::CpuInstruction => MetricValue::Number(if has_samples {
-            cpu_instruction_pmu_pct
-        } else {
-            0.0
-        }),
-        SpeReportCategory::LoadL1
-        | SpeReportCategory::LoadL2
-        | SpeReportCategory::LoadL3
-        | SpeReportCategory::LoadLlc
-        | SpeReportCategory::LoadDram
-        | SpeReportCategory::LoadUnknown
-        | SpeReportCategory::StoreL1
-        | SpeReportCategory::StoreL2
-        | SpeReportCategory::StoreL3
-        | SpeReportCategory::StoreLlc
-        | SpeReportCategory::StoreDram
-        | SpeReportCategory::StoreUnknown => {
-            if has_samples && !has_latency {
-                MetricValue::Missing("SPE latency field unavailable".to_string())
-            } else {
-                MetricValue::Number(spe_latency_pct)
-            }
-        }
-        SpeReportCategory::Branch | SpeReportCategory::Other | SpeReportCategory::DecodeUnknown => {
-            if has_latency {
-                MetricValue::Number(spe_latency_pct)
-            } else if has_samples {
-                MetricValue::Missing("SPE latency field unavailable".to_string())
-            } else {
-                MetricValue::Number(0.0)
-            }
-        }
+    if has_samples && !has_latency {
+        MetricValue::Missing("SPE latency field unavailable".to_string())
+    } else {
+        MetricValue::Number(spe_latency_pct)
     }
 }
 
-fn spe_report_categories() -> [(SpeReportCategory, &'static str); 16] {
+fn spe_report_categories() -> [(SpeReportCategory, &'static str); 34] {
     [
-        (SpeReportCategory::CpuInstruction, "cpu_instruction"),
         (SpeReportCategory::LoadL1, "load_l1"),
         (SpeReportCategory::LoadL2, "load_l2"),
         (SpeReportCategory::LoadL3, "load_l3"),
         (SpeReportCategory::LoadLlc, "load_llc"),
         (SpeReportCategory::LoadDram, "load_dram"),
+        (SpeReportCategory::LoadRemote, "load_remote"),
+        (SpeReportCategory::LoadIo, "load_io"),
         (SpeReportCategory::LoadUnknown, "load_unknown"),
         (SpeReportCategory::StoreL1, "store_l1"),
         (SpeReportCategory::StoreL2, "store_l2"),
         (SpeReportCategory::StoreL3, "store_l3"),
         (SpeReportCategory::StoreLlc, "store_llc"),
         (SpeReportCategory::StoreDram, "store_dram"),
+        (SpeReportCategory::StoreRemote, "store_remote"),
+        (SpeReportCategory::StoreIo, "store_io"),
         (SpeReportCategory::StoreUnknown, "store_unknown"),
-        (SpeReportCategory::Branch, "branch"),
-        (SpeReportCategory::Other, "other"),
+        (SpeReportCategory::AtomicL1, "atomic_l1"),
+        (SpeReportCategory::AtomicL2, "atomic_l2"),
+        (SpeReportCategory::AtomicL3, "atomic_l3"),
+        (SpeReportCategory::AtomicDram, "atomic_dram"),
+        (SpeReportCategory::AtomicUnknown, "atomic_unknown"),
+        (SpeReportCategory::BranchHit, "branch_hit"),
+        (SpeReportCategory::BranchMiss, "branch_miss"),
+        (SpeReportCategory::BranchUnknown, "branch_unknown"),
+        (SpeReportCategory::ComputeInt, "compute_int"),
+        (SpeReportCategory::ComputeFpSimd, "compute_fp_simd"),
+        (SpeReportCategory::ComputeCrypto, "compute_crypto"),
+        (SpeReportCategory::ComputeUnknown, "compute_unknown"),
+        (SpeReportCategory::FrontendOrDecode, "frontend_or_decode"),
+        (SpeReportCategory::SystemInstruction, "system_instruction"),
+        (SpeReportCategory::ExceptionOrTrap, "exception_or_trap"),
         (SpeReportCategory::DecodeUnknown, "decode_unknown"),
+        (SpeReportCategory::DataSourceUnknown, "data_source_unknown"),
+        (SpeReportCategory::OtherUnknown, "other_unknown"),
     ]
 }
 
@@ -1947,11 +1922,11 @@ mod tests {
     fn computes_spe_category_percentages_and_est_time() {
         let mut by_category = BTreeMap::new();
         by_category.insert(
-            SpeReportCategory::CpuInstruction,
+            SpeReportCategory::BranchUnknown,
             SpeCategoryAggregate {
                 sample_count: 1,
-                latency_cycles_sum: 0,
-                latency_sample_count: 0,
+                latency_cycles_sum: 25,
+                latency_sample_count: 1,
             },
         );
         by_category.insert(
@@ -1971,7 +1946,7 @@ mod tests {
             },
         );
 
-        let values = make_spe_category_values(&by_category, 4, 100, 25.0);
+        let values = make_spe_category_values(&by_category, 4, 125);
 
         assert!(matches!(
             values.get("load_dram.sample_pct"),
@@ -1979,42 +1954,56 @@ mod tests {
         ));
         assert!(matches!(
             values.get("load_dram.spe_latency_pct"),
-            Some(MetricValue::Number(value)) if (*value - 60.0).abs() < f64::EPSILON
+            Some(MetricValue::Number(value)) if (*value - 48.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
             values.get("load_dram.est_time_pct"),
-            Some(MetricValue::Number(value)) if (*value - 60.0).abs() < f64::EPSILON
+            Some(MetricValue::Number(value)) if (*value - 48.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
             values.get("store_unknown.sample_pct"),
             Some(MetricValue::Number(value)) if (*value - 25.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
-            values.get("cpu_instruction.spe_latency_pct"),
-            Some(MetricValue::Undefined(_))
+            values.get("branch_unknown.spe_latency_pct"),
+            Some(MetricValue::Number(value)) if (*value - 20.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
-            values.get("cpu_instruction.est_time_pct"),
-            Some(MetricValue::Number(value)) if (*value - 25.0).abs() < f64::EPSILON
+            values.get("branch_unknown.est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 20.0).abs() < f64::EPSILON
         ));
     }
 
     #[test]
-    fn cpu_instruction_est_time_is_zero_without_cpu_instruction_samples() {
-        let values = make_spe_category_values(&BTreeMap::new(), 0, 0, 100.0);
+    fn branch_unknown_est_time_uses_spe_latency_without_pmu() {
+        let mut by_category = BTreeMap::new();
+        by_category.insert(
+            SpeReportCategory::BranchUnknown,
+            SpeCategoryAggregate {
+                sample_count: 3,
+                latency_cycles_sum: 30,
+                latency_sample_count: 3,
+            },
+        );
+        by_category.insert(
+            SpeReportCategory::LoadDram,
+            SpeCategoryAggregate {
+                sample_count: 1,
+                latency_cycles_sum: 70,
+                latency_sample_count: 1,
+            },
+        );
+        let values = make_spe_category_values(&by_category, 4, 100);
 
         assert!(matches!(
-            values.get("cpu_instruction.sample_pct"),
-            Some(MetricValue::Number(value)) if *value == 0.0
+            values.get("branch_unknown.est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 30.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
-            values.get("cpu_instruction.pmu_cycles_pct"),
-            Some(MetricValue::Number(value)) if *value == 0.0
+            values.get("load_dram.est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 70.0).abs() < f64::EPSILON
         ));
-        assert!(matches!(
-            values.get("cpu_instruction.est_time_pct"),
-            Some(MetricValue::Number(value)) if *value == 0.0
-        ));
+        assert!(values.get("branch_unknown.pmu_cycles_pct").is_none());
     }
 
     #[test]

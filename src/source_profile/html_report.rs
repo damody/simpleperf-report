@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use super::bundle::SourceProfileBundle;
 use super::metrics::MetricValue;
 use super::report_model::{
-    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, spe_column_keys, ReportModel,
-    SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES,
+    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, ReportModel,
+    SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES, SPE_COLUMNS,
 };
 use super::summary::SourceReportSummary;
 
@@ -38,7 +38,7 @@ pub fn write_html_summary_from_model(
     let derived_pmu_columns = pmu_derived_column_keys(bundle);
     let derived_pmu_columns_json =
         serde_json::to_string(&derived_pmu_columns).unwrap_or_else(|_| "[]".to_string());
-    let spe_columns = spe_column_keys();
+    let spe_columns = displayed_spe_column_keys(model);
     let spe_columns_json = serde_json::to_string(&spe_columns).unwrap_or_else(|_| "[]".to_string());
     let mut default_source_columns = vec![
         "file".to_string(),
@@ -51,7 +51,7 @@ pub fn write_html_summary_from_model(
     ];
     default_source_columns.extend(raw_pmu_columns.iter().cloned());
     default_source_columns.extend(derived_pmu_columns.iter().cloned());
-    default_source_columns.extend(default_spe_source_columns(&spe_columns));
+    default_source_columns.extend(default_spe_source_columns(&spe_columns, model));
     default_source_columns.push("code".to_string());
     let default_source_columns_json =
         serde_json::to_string(&default_source_columns).unwrap_or_else(|_| "[]".to_string());
@@ -140,7 +140,7 @@ pub fn write_html_summary_from_model(
   <details class="report-section" open>
   <summary>SPE Category Summary</summary>
   <table>
-    <tr><th>Category</th><th>sample%</th><th>pmu_cycles%</th><th>spe_latency%</th><th>est_time%</th></tr>
+    <tr><th>Category</th><th>sample%</th><th>spe_latency%</th><th>est_time%</th></tr>
     {spe_category_summary_rows}
   </table>
   </details>
@@ -625,55 +625,85 @@ pub fn write_html_summary_from_model(
     fs::write(output, html).with_context(|| format!("Failed to write '{}'", output.display()))
 }
 
-fn default_spe_source_columns(spe_columns: &[String]) -> Vec<String> {
-    [
+fn default_spe_source_columns(spe_columns: &[String], model: &ReportModel) -> Vec<String> {
+    let mut columns = [
         "spe_sample_count",
         "spe_latency_cycles_avg",
         "spe_decode_errors",
-        "cpu_instruction.est_time_pct",
-        "load_l1.est_time_pct",
-        "load_l2.est_time_pct",
-        "load_l3.est_time_pct",
-        "load_llc.est_time_pct",
-        "load_dram.est_time_pct",
-        "load_unknown.est_time_pct",
-        "store_l1.est_time_pct",
-        "store_l2.est_time_pct",
-        "store_l3.est_time_pct",
-        "store_llc.est_time_pct",
-        "store_dram.est_time_pct",
-        "store_unknown.est_time_pct",
     ]
     .into_iter()
     .filter(|key| spe_columns.iter().any(|column| column == key))
     .map(str::to_string)
-    .collect()
+    .collect::<Vec<_>>();
+
+    for category in SPE_CATEGORY_NAMES {
+        let key = format!("{category}.est_time_pct");
+        if spe_columns.iter().any(|column| column == &key)
+            && !is_zero_or_absent_summary(&summarize_spe_category_metric(model, &key, false))
+        {
+            columns.push(key);
+        }
+    }
+
+    columns
+}
+
+fn displayed_spe_column_keys(model: &ReportModel) -> Vec<String> {
+    let mut keys = SPE_COLUMNS
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect::<Vec<_>>();
+
+    for category in SPE_CATEGORY_NAMES {
+        let values = SPE_CATEGORY_METRICS
+            .iter()
+            .map(|metric| {
+                let key = format!("{category}.{metric}");
+                summarize_spe_category_metric(model, &key, *metric == "spe_latency_pct")
+            })
+            .collect::<Vec<_>>();
+        if values.iter().all(|value| is_zero_or_absent_summary(value)) {
+            continue;
+        }
+        keys.extend(
+            SPE_CATEGORY_METRICS
+                .iter()
+                .map(|metric| format!("{category}.{metric}")),
+        );
+    }
+
+    keys
 }
 
 fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
     let metrics = [
         ("sample_pct", false),
-        ("pmu_cycles_pct", false),
         ("spe_latency_pct", true),
         ("est_time_pct", false),
     ];
     let rows = SPE_CATEGORY_NAMES
         .iter()
-        .map(|category| {
-            let cells = metrics
+        .filter_map(|category| {
+            let values = metrics
                 .iter()
                 .map(|(metric, show_na)| {
                     let key = format!("{category}.{metric}");
-                    let value = summarize_spe_category_metric(model, &key, *show_na);
-                    format!("<td>{}</td>", escape_html(&value))
+                    summarize_spe_category_metric(model, &key, *show_na)
                 })
+                .collect::<Vec<_>>();
+            if values.iter().all(|value| is_zero_or_absent_summary(value)) {
+                return None;
+            }
+            let cells = values
+                .into_iter()
+                .map(|value| format!("<td>{}</td>", escape_html(&value)))
                 .collect::<Vec<_>>()
                 .join("");
-            format!(
+            Some(format!(
                 "<tr><td><code>{}</code></td>{}</tr>",
                 escape_html(category),
                 cells
-            )
+            ))
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
@@ -682,9 +712,13 @@ fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> S
         } else {
             "Missing"
         };
-        return format!("<tr><td colspan=\"5\">{status}</td></tr>");
+        return format!("<tr><td colspan=\"4\">{status}</td></tr>");
     }
     rows.join("\n")
+}
+
+fn is_zero_or_absent_summary(value: &str) -> bool {
+    matches!(value, "0.000%" | "0%" | "N/A" | "Missing" | "Unresolved")
 }
 
 fn summarize_spe_category_metric(
@@ -908,7 +942,6 @@ fn is_spe_category_metric(key: &str) -> bool {
 fn spe_category_metric_formula(key: &str) -> &'static str {
     match key.rsplit_once('.').map(|(_, metric)| metric) {
         Some("sample_pct") => "category SPE samples / total SPE samples",
-        Some("pmu_cycles_pct") => "source-line PMU cycles / total PMU cycles",
         Some("spe_latency_pct") => "category SPE latency cycles / total SPE latency cycles",
         Some("est_time_pct") => "estimated time percentage",
         _ => "SPE category metric",
@@ -918,12 +951,9 @@ fn spe_category_metric_formula(key: &str) -> &'static str {
 fn spe_category_metric_meaning(key: &str) -> &'static str {
     match key.rsplit_once('.').map(|(_, metric)| metric) {
         Some("sample_pct") => "此類 SPE sample 在整份 session 中的比例；不是時間。",
-        Some("pmu_cycles_pct") => {
-            "同一 source line 的 PMU cycles 佔比；memory 類別中作為 CPU hotspot context。"
-        }
-        Some("spe_latency_pct") => "此類 SPE latency cycles 佔比；cpu_instruction 為 N/A。",
+        Some("spe_latency_pct") => "此類 SPE latency cycles 佔比；沒有 latency field 時為 Missing。",
         Some("est_time_pct") => {
-            "估算時間佔比；CPU instruction 來自 PMU cycles，load/store 來自 SPE latency。"
+            "估算時間佔比；目前用此分類的 SPE latency cycles 佔整份 session SPE latency cycles 的比例。"
         }
         _ => "Arm SPE category decoded metric。",
     }
@@ -1098,7 +1128,9 @@ fn escape_html(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::BTreeMap, path::Path};
+
+    use crate::source_profile::report_model::ReportLineRow;
 
     use super::*;
 
@@ -1137,10 +1169,11 @@ mod tests {
         assert!(summary_pos < spe_summary_pos);
         assert!(spe_summary_pos < column_help_pos);
         assert!(column_help_pos < source_lines_pos);
-        assert!(html.contains("<th>Category</th><th>sample%</th><th>pmu_cycles%</th><th>spe_latency%</th><th>est_time%</th>"));
-        assert!(html.contains("<tr><td><code>cpu_instruction</code></td>"));
-        assert!(html.contains("<tr><td><code>store_l1</code></td>"));
-        assert!(html.contains("<tr><td><code>load_dram</code></td>"));
+        assert!(html
+            .contains("<th>Category</th><th>sample%</th><th>spe_latency%</th><th>est_time%</th>"));
+        assert!(!html.contains("pmu_cycles%"));
+        assert!(html.contains("<tr><td colspan=\"4\">Missing</td></tr>"));
+        assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
         assert!(html
             .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
         assert!(html.contains("Formula / Source"));
@@ -1150,8 +1183,9 @@ mod tests {
         assert!(html.contains("<code>cpi</code>"));
         assert!(html.contains("<code>mips</code>"));
         assert!(html.contains("<code>spe_sample_count</code>"));
-        assert!(html.contains("<code>load_dram.est_time_pct</code>"));
-        assert!(html.contains("<code>store_unknown.est_time_pct</code>"));
+        assert!(!html.contains("<code>load_dram.est_time_pct</code>"));
+        assert!(!html.contains("<code>load_llc.est_time_pct</code>"));
+        assert!(!html.contains("<code>store_unknown.est_time_pct</code>"));
         assert!(html.contains("source text"));
         assert!(html.contains("Quality"));
         assert!(html.contains("<details class=\"report-section\">\n    <summary>Quality</summary>"));
@@ -1195,6 +1229,11 @@ mod tests {
         assert!(!source_columns.contains("key: \"self_weight\""));
         assert!(!source_columns.contains("key: \"accumulated_weight\""));
         assert!(!source_columns.contains("key: \"status\""));
+        assert!(!html.contains("\"load_l1.est_time_pct\""));
+        assert!(!html.contains("\"load_llc.est_time_pct\""));
+        assert!(!html.contains("\"store_llc.est_time_pct\""));
+        assert!(!html.contains("\"branch_unknown.est_time_pct\""));
+        assert!(!html.contains("\"compute_unknown.est_time_pct\""));
         assert!(!default_columns.contains("\"p_pct\""));
         assert!(!default_columns.contains("\"acc_p_pct\""));
         assert!(!default_columns.contains("\"file_p_pct\""));
@@ -1203,25 +1242,24 @@ mod tests {
         assert!(default_columns.contains("\"spe_sample_count\""));
         assert!(default_columns.contains("\"spe_latency_cycles_avg\""));
         assert!(default_columns.contains("\"spe_decode_errors\""));
-        assert!(default_columns.contains("\"cpu_instruction.est_time_pct\""));
-        assert!(default_columns.contains("\"load_l1.est_time_pct\""));
-        assert!(default_columns.contains("\"load_l2.est_time_pct\""));
-        assert!(default_columns.contains("\"load_l3.est_time_pct\""));
-        assert!(default_columns.contains("\"load_llc.est_time_pct\""));
-        assert!(default_columns.contains("\"load_dram.est_time_pct\""));
-        assert!(default_columns.contains("\"load_unknown.est_time_pct\""));
-        assert!(default_columns.contains("\"store_l1.est_time_pct\""));
-        assert!(default_columns.contains("\"store_l2.est_time_pct\""));
-        assert!(default_columns.contains("\"store_l3.est_time_pct\""));
-        assert!(default_columns.contains("\"store_llc.est_time_pct\""));
-        assert!(default_columns.contains("\"store_dram.est_time_pct\""));
-        assert!(default_columns.contains("\"store_unknown.est_time_pct\""));
+        assert!(!default_columns.contains("\"load_l1.est_time_pct\""));
+        assert!(!default_columns.contains("\"load_l2.est_time_pct\""));
+        assert!(!default_columns.contains("\"load_l3.est_time_pct\""));
+        assert!(!default_columns.contains("\"load_llc.est_time_pct\""));
+        assert!(!default_columns.contains("\"load_dram.est_time_pct\""));
+        assert!(!default_columns.contains("\"load_unknown.est_time_pct\""));
+        assert!(!default_columns.contains("\"store_l1.est_time_pct\""));
+        assert!(!default_columns.contains("\"store_l2.est_time_pct\""));
+        assert!(!default_columns.contains("\"store_l3.est_time_pct\""));
+        assert!(!default_columns.contains("\"store_llc.est_time_pct\""));
+        assert!(!default_columns.contains("\"store_dram.est_time_pct\""));
+        assert!(!default_columns.contains("\"store_unknown.est_time_pct\""));
         assert!(html.contains("cpu_cycles"));
         assert!(html.contains("inst_retired"));
         assert!(!html.contains("stall_backend"));
         assert!(html.contains("spe_sample_count"));
-        assert!(html.contains("load_dram.est_time_pct"));
-        assert!(html.contains("store_unknown.est_time_pct"));
+        assert!(!html.contains("load_dram.est_time_pct"));
+        assert!(!html.contains("store_unknown.est_time_pct"));
         assert!(html.contains("class=\"sort-indicator\""));
         assert!(html.contains("updateSourceSortIndicators"));
         assert!(!html.contains("id=\"sourceDetail\""));
@@ -1251,6 +1289,61 @@ mod tests {
         assert!(html.contains("function_only"));
         assert!(html.contains("/api/summary"));
         assert!(!html.contains("const sourceRows ="));
+    }
+
+    #[test]
+    fn displayed_spe_columns_hide_zero_category_metrics() {
+        let model = ReportModel {
+            rows: vec![ReportLineRow {
+                file: "src/main.cpp".to_string(),
+                line: 7,
+                function: "Tick".to_string(),
+                module: "libgame.so".to_string(),
+                code: "Tick();".to_string(),
+                status: "ok".to_string(),
+                cpu: "0".to_string(),
+                thread: "1".to_string(),
+                sample_count: 0,
+                self_weight: 0.0,
+                accumulated_weight: 0.0,
+                p_pct: 0.0,
+                acc_p_pct: 0.0,
+                file_p_pct: 0.0,
+                file_acc_p_pct: 0.0,
+                pmu_values: BTreeMap::new(),
+                spe_values: BTreeMap::from([
+                    ("load_l1.sample_pct".to_string(), MetricValue::Number(10.0)),
+                    (
+                        "load_l1.spe_latency_pct".to_string(),
+                        MetricValue::Number(12.0),
+                    ),
+                    (
+                        "load_l1.est_time_pct".to_string(),
+                        MetricValue::Number(12.0),
+                    ),
+                    ("load_llc.sample_pct".to_string(), MetricValue::Number(0.0)),
+                    (
+                        "load_llc.spe_latency_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_llc.est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                ]),
+                detail: String::new(),
+            }],
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let columns = displayed_spe_column_keys(&model);
+
+        assert!(columns.contains(&"load_l1.est_time_pct".to_string()));
+        assert!(!columns.contains(&"load_llc.est_time_pct".to_string()));
     }
 
     #[test]

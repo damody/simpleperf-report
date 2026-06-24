@@ -11,15 +11,16 @@ use serde::Serialize;
 
 use super::bundle::SourceProfileBundle;
 use super::instruction_class::{
-    build_instruction_index_from_elf, InstructionClass, InstructionIndex,
+    build_instruction_index_from_elf, InstructionClass, InstructionIndex, LoadInstructionKind,
 };
 use super::line_resolver::{
     resolve_source_path, runtime_address_to_relative, CachedElfLineResolver,
 };
 use super::metrics::{
-    aggregate_instruction_classes_by_address, aggregate_pmu_file, aggregate_spe_by_address,
-    aggregate_spe_categories_by_address, compute_percentages, derive_pmu_metrics,
-    InstructionClassAddressAggregate, MetricValue, PmuAddressAggregate, PmuAddressKey,
+    aggregate_instruction_classes_by_address, aggregate_load_instruction_kinds_by_address,
+    aggregate_pmu_file, aggregate_spe_by_address, aggregate_spe_categories_by_address,
+    compute_percentages, derive_pmu_metrics, InstructionClassAddressAggregate,
+    LoadInstructionAddressAggregate, MetricValue, PmuAddressAggregate, PmuAddressKey,
     SpeAddressAggregate, SpeAddressCategoryAggregate, SpeCategoryAggregate, SpeReportCategory,
 };
 use super::sample_stream::{for_each_pmu_sample, read_spe_samples, PmuSample};
@@ -133,6 +134,21 @@ pub const INSTRUCTION_CLASS_NAMES: &[&str] = &[
 
 pub const INSTRUCTION_CLASS_METRICS: &[&str] = SPE_CATEGORY_METRICS;
 
+pub const LOAD_INSTRUCTION_KIND_NAMES: &[&str] = &[
+    "load_scalar_single",
+    "load_scalar_pair",
+    "load_sign_extend",
+    "load_vector_single",
+    "load_vector_pair",
+    "load_literal",
+    "load_atomic_exclusive",
+    "load_acquire",
+    "load_prefetch",
+    "load_unknown",
+];
+
+pub const LOAD_INSTRUCTION_METRICS: &[&str] = SPE_CATEGORY_METRICS;
+
 pub fn spe_category_column_keys() -> Vec<String> {
     let mut keys = Vec::new();
     for category in SPE_CATEGORY_NAMES {
@@ -148,6 +164,16 @@ pub fn instruction_class_column_keys() -> Vec<String> {
     for class in INSTRUCTION_CLASS_NAMES {
         for metric in INSTRUCTION_CLASS_METRICS {
             keys.push(format!("instruction_class.{class}.{metric}"));
+        }
+    }
+    keys
+}
+
+pub fn load_instruction_column_keys() -> Vec<String> {
+    let mut keys = Vec::new();
+    for kind in LOAD_INSTRUCTION_KIND_NAMES {
+        for metric in LOAD_INSTRUCTION_METRICS {
+            keys.push(format!("load_instruction.{kind}.{metric}"));
         }
     }
     keys
@@ -232,6 +258,7 @@ pub struct ReportModel {
     pub spe_cpu_category_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
     pub spe_cpu_category_histograms: BTreeMap<u32, BTreeMap<String, SpeLatencyHistogram>>,
     pub instruction_cpu_class_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
+    pub load_cpu_kind_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
     pub warnings: Vec<String>,
 }
 
@@ -270,6 +297,7 @@ pub struct ReportLineRow {
     pub pmu_values: BTreeMap<String, MetricValue>,
     pub spe_values: BTreeMap<String, MetricValue>,
     pub instruction_values: BTreeMap<String, MetricValue>,
+    pub load_instruction_values: BTreeMap<String, MetricValue>,
     pub detail: String,
 }
 
@@ -349,6 +377,8 @@ struct MutableLineRow {
     spe_cpu_categories: BTreeMap<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>,
     instruction_classes: BTreeMap<InstructionClass, SpeCategoryAggregate>,
     instruction_cpu_classes: BTreeMap<u32, BTreeMap<InstructionClass, SpeCategoryAggregate>>,
+    load_instruction_kinds: BTreeMap<LoadInstructionKind, SpeCategoryAggregate>,
+    load_cpu_instruction_kinds: BTreeMap<u32, BTreeMap<LoadInstructionKind, SpeCategoryAggregate>>,
     unresolved: Vec<String>,
 }
 
@@ -394,6 +424,8 @@ impl MutableLineRow {
             spe_cpu_categories: BTreeMap::new(),
             instruction_classes: BTreeMap::new(),
             instruction_cpu_classes: BTreeMap::new(),
+            load_instruction_kinds: BTreeMap::new(),
+            load_cpu_instruction_kinds: BTreeMap::new(),
             unresolved: Vec::new(),
         }
     }
@@ -432,6 +464,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     let mut spe_cpu_category_values = BTreeMap::new();
     let mut spe_cpu_category_histograms = BTreeMap::new();
     let mut instruction_cpu_class_values = BTreeMap::new();
+    let mut load_cpu_kind_values = BTreeMap::new();
     for matched in elf_matches.values() {
         if matched.quality == ElfMatchQuality::Missing && should_warn_missing_debug_elf(matched) {
             warnings.push(format!("Debug ELF Missing for {}", matched.module_id));
@@ -523,12 +556,24 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                     &mut warnings,
                 )
             });
+        let mut load_kind_aggregates =
+            aggregate_load_instruction_kinds_by_address(&samples, |sample| {
+                instruction_cache.load_kind(
+                    bundle,
+                    &elf_matches,
+                    sample.mapping_id,
+                    sample.pc,
+                    &mut warnings,
+                )
+            });
         spe_cpu_category_values =
             make_spe_cpu_category_values_from_address_aggregates(&category_aggregates);
         spe_cpu_category_histograms =
             make_spe_cpu_category_histograms_from_address_aggregates(&category_aggregates);
         instruction_cpu_class_values =
             make_instruction_cpu_class_values_from_address_aggregates(&instruction_aggregates);
+        load_cpu_kind_values =
+            make_load_cpu_kind_values_from_address_aggregates(&load_kind_aggregates);
         log_timing("build_model.spe_read_aggregate", phase_start.elapsed());
 
         phase_start = Instant::now();
@@ -558,6 +603,9 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 if let Some(instruction_classes) = instruction_aggregates.remove(&key) {
                     merge_instruction_classes(row, instruction_classes);
                 }
+                if let Some(load_kinds) = load_kind_aggregates.remove(&key) {
+                    merge_load_instruction_kinds(row, load_kinds);
+                }
                 merge_spe(row, aggregate);
             } else {
                 warnings.push(format!(
@@ -586,6 +634,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         spe_cpu_category_values,
         spe_cpu_category_histograms,
         instruction_cpu_class_values,
+        load_cpu_kind_values,
         warnings,
     })
 }
@@ -765,19 +814,44 @@ impl InstructionIndexCache {
         runtime_pc: u64,
         warnings: &mut Vec<String>,
     ) -> InstructionClass {
+        self.lookup_instruction(bundle, elf_matches, mapping_id, runtime_pc, warnings)
+            .map(|instruction| instruction.class)
+            .unwrap_or(InstructionClass::MissingInstruction)
+    }
+
+    fn load_kind(
+        &mut self,
+        bundle: &SourceProfileBundle,
+        elf_matches: &BTreeMap<String, super::symbol_resolver::ElfMatch>,
+        mapping_id: u64,
+        runtime_pc: u64,
+        warnings: &mut Vec<String>,
+    ) -> Option<LoadInstructionKind> {
+        self.lookup_instruction(bundle, elf_matches, mapping_id, runtime_pc, warnings)
+            .and_then(|instruction| instruction.load_kind)
+    }
+
+    fn lookup_instruction(
+        &mut self,
+        bundle: &SourceProfileBundle,
+        elf_matches: &BTreeMap<String, super::symbol_resolver::ElfMatch>,
+        mapping_id: u64,
+        runtime_pc: u64,
+        warnings: &mut Vec<String>,
+    ) -> Option<super::instruction_class::DecodedInstruction> {
         let normalized_pc = normalize_aarch64_tagged_ip(runtime_pc);
         let Some(mapping) = resolve_mapping_for_ip(&bundle.maps.maps, mapping_id, normalized_pc)
         else {
-            return InstructionClass::MissingInstruction;
+            return None;
         };
         let Some(matched) = elf_matches.get(&mapping.module_id) else {
-            return InstructionClass::MissingInstruction;
+            return None;
         };
         let Some(path) = matched.candidate_path.as_ref() else {
-            return InstructionClass::MissingInstruction;
+            return None;
         };
         let Some(relative_address) = relative_address_for_mapping(mapping, normalized_pc) else {
-            return InstructionClass::MissingInstruction;
+            return None;
         };
 
         if !self.indexes.contains_key(path) {
@@ -802,8 +876,7 @@ impl InstructionIndexCache {
             .get(path)
             .and_then(|index| index.as_ref())
             .and_then(|index| index.lookup(relative_address))
-            .map(|instruction| instruction.class)
-            .unwrap_or(InstructionClass::MissingInstruction)
+            .cloned()
     }
 }
 
@@ -1274,6 +1347,23 @@ fn merge_instruction_classes(
     }
 }
 
+fn merge_load_instruction_kinds(
+    row: &mut MutableLineRow,
+    aggregate: LoadInstructionAddressAggregate,
+) {
+    for (kind, kind_aggregate) in aggregate.kinds {
+        let row_kind = row.load_instruction_kinds.entry(kind).or_default();
+        row_kind.merge_from(&kind_aggregate);
+    }
+    for (cpu, kinds) in aggregate.cpu_kinds {
+        let row_cpu_kinds = row.load_cpu_instruction_kinds.entry(cpu).or_default();
+        for (kind, kind_aggregate) in kinds {
+            let row_kind = row_cpu_kinds.entry(kind).or_default();
+            row_kind.merge_from(&kind_aggregate);
+        }
+    }
+}
+
 fn make_spe_cpu_category_values(
     rows: &BTreeMap<(PathBuf, u32), MutableLineRow>,
 ) -> BTreeMap<u32, BTreeMap<String, MetricValue>> {
@@ -1503,6 +1593,40 @@ fn make_instruction_cpu_class_values_from_address_aggregates(
         .collect()
 }
 
+fn make_load_cpu_kind_values_from_address_aggregates(
+    address_aggregates: &BTreeMap<PmuAddressKey, LoadInstructionAddressAggregate>,
+) -> BTreeMap<u32, BTreeMap<String, MetricValue>> {
+    let mut cpu_kinds = BTreeMap::<u32, BTreeMap<LoadInstructionKind, SpeCategoryAggregate>>::new();
+    for aggregate in address_aggregates.values() {
+        for (cpu, kinds) in &aggregate.cpu_kinds {
+            let cpu_kind_map = cpu_kinds.entry(*cpu).or_default();
+            for (kind, kind_aggregate) in kinds {
+                let cpu_kind = cpu_kind_map.entry(*kind).or_default();
+                cpu_kind.merge_from(kind_aggregate);
+            }
+        }
+    }
+
+    cpu_kinds
+        .into_iter()
+        .map(|(cpu, kinds)| {
+            let total_samples = kinds.values().map(|kind| kind.sample_count).sum::<u64>();
+            let total_latency_cycles = kinds
+                .values()
+                .map(|kind| kind.latency_cycles_sum)
+                .sum::<u64>();
+            (
+                cpu,
+                make_load_instruction_kind_distribution_values(
+                    &kinds,
+                    total_samples,
+                    total_latency_cycles,
+                ),
+            )
+        })
+        .collect()
+}
+
 fn make_spe_category_summary_values(
     by_category: &BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
     total_spe_samples: u64,
@@ -1686,6 +1810,96 @@ fn make_instruction_class_distribution_values(
     values
 }
 
+fn make_load_instruction_kind_summary_values(
+    by_kind: &BTreeMap<LoadInstructionKind, SpeCategoryAggregate>,
+    total_spe_samples: u64,
+    total_spe_latency_cycles: u64,
+    est_time_denominator_cycles: Option<f64>,
+    spe_effective_period: f64,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    for (kind, name) in load_instruction_kinds() {
+        let aggregate = by_kind.get(&kind);
+        let sample_count = aggregate.map(|value| value.sample_count).unwrap_or(0);
+        let latency_cycles = aggregate.map(|value| value.latency_cycles_sum).unwrap_or(0);
+        let latency_sample_count = aggregate
+            .map(|value| value.latency_sample_count)
+            .unwrap_or(0);
+        let sample_pct = percent(sample_count as f64, total_spe_samples as f64);
+        let spe_latency_pct = percent(latency_cycles as f64, total_spe_latency_cycles as f64);
+        let has_samples = sample_count > 0;
+        let has_latency = latency_sample_count > 0;
+
+        values.insert(
+            format!("load_instruction.{name}.sample_pct"),
+            MetricValue::Number(sample_pct),
+        );
+        values.insert(
+            format!("load_instruction.{name}.spe_latency_pct"),
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(spe_latency_pct)
+            },
+        );
+        values.insert(
+            format!("load_instruction.{name}.est_time_pct"),
+            category_est_time_value(
+                has_samples,
+                has_latency,
+                latency_cycles,
+                est_time_denominator_cycles,
+                spe_effective_period,
+            ),
+        );
+        values.extend(load_instruction_latency_metric_values(name, aggregate));
+    }
+    values
+}
+
+fn make_load_instruction_kind_distribution_values(
+    by_kind: &BTreeMap<LoadInstructionKind, SpeCategoryAggregate>,
+    total_spe_samples: u64,
+    total_spe_latency_cycles: u64,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    for (kind, name) in load_instruction_kinds() {
+        let aggregate = by_kind.get(&kind);
+        let sample_count = aggregate.map(|value| value.sample_count).unwrap_or(0);
+        let latency_cycles = aggregate.map(|value| value.latency_cycles_sum).unwrap_or(0);
+        let latency_sample_count = aggregate
+            .map(|value| value.latency_sample_count)
+            .unwrap_or(0);
+        let sample_pct = percent(sample_count as f64, total_spe_samples as f64);
+        let est_time_pct = percent(latency_cycles as f64, total_spe_latency_cycles as f64);
+        let has_samples = sample_count > 0;
+        let has_latency = latency_sample_count > 0;
+
+        values.insert(
+            format!("load_instruction.{name}.sample_pct"),
+            MetricValue::Number(sample_pct),
+        );
+        values.insert(
+            format!("load_instruction.{name}.spe_latency_pct"),
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(est_time_pct)
+            },
+        );
+        values.insert(
+            format!("load_instruction.{name}.est_time_pct"),
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(est_time_pct)
+            },
+        );
+        values.extend(load_instruction_latency_metric_values(name, aggregate));
+    }
+    values
+}
+
 fn instruction_class_latency_metric_values(
     name: &str,
     aggregate: Option<&SpeCategoryAggregate>,
@@ -1731,6 +1945,56 @@ fn instruction_class_latency_metric_values(
     );
     values.insert(
         format!("instruction_class.{name}.over_avg_x3_pct"),
+        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::over_avg_x3_pct)),
+    );
+    values
+}
+
+fn load_instruction_latency_metric_values(
+    name: &str,
+    aggregate: Option<&SpeCategoryAggregate>,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    let has_samples = aggregate
+        .map(|value| value.sample_count > 0)
+        .unwrap_or(false);
+    let has_latency = aggregate
+        .map(|value| value.latency_sample_count > 0)
+        .unwrap_or(false);
+    let missing_or_zero = |value: Option<f64>| {
+        if has_samples && !has_latency {
+            MetricValue::Missing("SPE latency field unavailable".to_string())
+        } else {
+            MetricValue::Number(value.unwrap_or(0.0))
+        }
+    };
+
+    values.insert(
+        format!("load_instruction.{name}.min_latency_cycles"),
+        missing_or_zero(aggregate.and_then(|value| value.latency_cycles_min.map(f64::from))),
+    );
+    values.insert(
+        format!("load_instruction.{name}.max_latency_cycles"),
+        missing_or_zero(aggregate.and_then(|value| value.latency_cycles_max.map(f64::from))),
+    );
+    values.insert(
+        format!("load_instruction.{name}.avg_latency_cycles"),
+        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::avg_latency_cycles)),
+    );
+    values.insert(
+        format!("load_instruction.{name}.std_latency_cycles"),
+        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::std_latency_cycles)),
+    );
+    values.insert(
+        format!("load_instruction.{name}.p95_latency_cycles"),
+        missing_or_zero(aggregate.and_then(|value| value.percentile_latency_cycles(95.0))),
+    );
+    values.insert(
+        format!("load_instruction.{name}.p99_latency_cycles"),
+        missing_or_zero(aggregate.and_then(|value| value.percentile_latency_cycles(99.0))),
+    );
+    values.insert(
+        format!("load_instruction.{name}.over_avg_x3_pct"),
         missing_or_zero(aggregate.and_then(SpeCategoryAggregate::over_avg_x3_pct)),
     );
     values
@@ -1897,6 +2161,16 @@ fn finalize_rows(
         .flat_map(|row| row.instruction_classes.values())
         .map(|class| class.latency_cycles_sum)
         .sum::<u64>();
+    let total_load_instruction_samples = rows
+        .values()
+        .flat_map(|row| row.load_instruction_kinds.values())
+        .map(|kind| kind.sample_count)
+        .sum::<u64>();
+    let total_load_instruction_latency_cycles = rows
+        .values()
+        .flat_map(|row| row.load_instruction_kinds.values())
+        .map(|kind| kind.latency_cycles_sum)
+        .sum::<u64>();
     rows.into_values()
         .map(|row| {
             let mut pmu_values = BTreeMap::new();
@@ -1938,6 +2212,13 @@ fn finalize_rows(
                 (total_pmu_cpu_cycles > 0.0).then_some(total_pmu_cpu_cycles),
                 spe_effective_period,
             );
+            let load_instruction_values = make_load_instruction_kind_summary_values(
+                &row.load_instruction_kinds,
+                total_load_instruction_samples,
+                total_load_instruction_latency_cycles,
+                (total_pmu_cpu_cycles > 0.0).then_some(total_pmu_cpu_cycles),
+                spe_effective_period,
+            );
             let self_weight = pmu_self_weight(&row) as f64;
             let accumulated_weight =
                 row.pmu_acc
@@ -1948,12 +2229,14 @@ fn finalize_rows(
                 &pmu_values,
                 &spe_values,
                 &instruction_values,
+                &load_instruction_values,
                 !row.unresolved.is_empty(),
             );
             let detail = metric_detail(
                 &pmu_values,
                 &spe_values,
                 &instruction_values,
+                &load_instruction_values,
                 &row.unresolved,
             );
             ReportLineRow {
@@ -1975,6 +2258,7 @@ fn finalize_rows(
                 pmu_values,
                 spe_values,
                 instruction_values,
+                load_instruction_values,
                 detail,
             }
         })
@@ -2220,6 +2504,24 @@ fn instruction_classes() -> [(InstructionClass, &'static str); 15] {
     ]
 }
 
+fn load_instruction_kinds() -> [(LoadInstructionKind, &'static str); 10] {
+    [
+        (LoadInstructionKind::ScalarSingle, "load_scalar_single"),
+        (LoadInstructionKind::ScalarPair, "load_scalar_pair"),
+        (LoadInstructionKind::SignExtend, "load_sign_extend"),
+        (LoadInstructionKind::VectorSingle, "load_vector_single"),
+        (LoadInstructionKind::VectorPair, "load_vector_pair"),
+        (LoadInstructionKind::Literal, "load_literal"),
+        (
+            LoadInstructionKind::AtomicExclusive,
+            "load_atomic_exclusive",
+        ),
+        (LoadInstructionKind::Acquire, "load_acquire"),
+        (LoadInstructionKind::Prefetch, "load_prefetch"),
+        (LoadInstructionKind::Unknown, "load_unknown"),
+    ]
+}
+
 fn compute_row_percentages(rows: &mut [ReportLineRow]) {
     let total_self = rows.iter().map(|row| row.self_weight).sum::<f64>();
     let total_acc = rows.iter().map(|row| row.accumulated_weight).sum::<f64>();
@@ -2334,6 +2636,7 @@ fn status_text(
     pmu_values: &BTreeMap<String, MetricValue>,
     spe_values: &BTreeMap<String, MetricValue>,
     instruction_values: &BTreeMap<String, MetricValue>,
+    load_instruction_values: &BTreeMap<String, MetricValue>,
     unresolved: bool,
 ) -> String {
     let mut flags = Vec::new();
@@ -2341,6 +2644,7 @@ fn status_text(
         .values()
         .chain(spe_values.values())
         .chain(instruction_values.values())
+        .chain(load_instruction_values.values())
         .any(|value| matches!(value, MetricValue::Number(number) if *number > 0.0))
     {
         flags.push("NonZero");
@@ -2349,6 +2653,7 @@ fn status_text(
         .values()
         .chain(spe_values.values())
         .chain(instruction_values.values())
+        .chain(load_instruction_values.values())
         .any(|value| matches!(value, MetricValue::Missing(_)))
     {
         flags.push("Missing");
@@ -2358,6 +2663,7 @@ fn status_text(
             .values()
             .chain(spe_values.values())
             .chain(instruction_values.values())
+            .chain(load_instruction_values.values())
             .any(|value| matches!(value, MetricValue::Unresolved(_)))
     {
         flags.push("Unresolved");
@@ -2366,6 +2672,7 @@ fn status_text(
         .values()
         .chain(spe_values.values())
         .chain(instruction_values.values())
+        .chain(load_instruction_values.values())
         .any(|value| matches!(value, MetricValue::Undefined(_)))
     {
         flags.push("Undefined");
@@ -2381,6 +2688,7 @@ fn metric_detail(
     pmu_values: &BTreeMap<String, MetricValue>,
     spe_values: &BTreeMap<String, MetricValue>,
     instruction_values: &BTreeMap<String, MetricValue>,
+    load_instruction_values: &BTreeMap<String, MetricValue>,
     unresolved: &[String],
 ) -> String {
     let mut parts = Vec::new();
@@ -2388,6 +2696,7 @@ fn metric_detail(
         .iter()
         .chain(spe_values.iter())
         .chain(instruction_values.iter())
+        .chain(load_instruction_values.iter())
     {
         parts.push(format!("{key}={}", metric_value_text(Some(value))));
     }
@@ -2651,6 +2960,8 @@ mod tests {
             spe_cpu_categories: BTreeMap::new(),
             instruction_classes: BTreeMap::new(),
             instruction_cpu_classes: BTreeMap::new(),
+            load_instruction_kinds: BTreeMap::new(),
+            load_cpu_instruction_kinds: BTreeMap::new(),
             unresolved: Vec::new(),
         };
         let rows = finalize_rows(
@@ -2853,6 +3164,36 @@ mod tests {
             instruction_values
                 .get(&4)
                 .and_then(|values| values.get("instruction_class.compute_int.sample_pct")),
+            Some(MetricValue::Number(value)) if (value - 100.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn load_kind_cpu_summary_can_be_built_without_source_rows() {
+        let mut scalar = SpeCategoryAggregate::default();
+        scalar.sample_count = 2;
+        scalar.record_latency(20);
+        scalar.record_latency(40);
+
+        let mut address = LoadInstructionAddressAggregate::default();
+        address
+            .cpu_kinds
+            .entry(4)
+            .or_default()
+            .insert(LoadInstructionKind::ScalarSingle, scalar);
+
+        let values = make_load_cpu_kind_values_from_address_aggregates(&BTreeMap::from([(
+            PmuAddressKey {
+                mapping_id: 1,
+                ip: 0x1000,
+            },
+            address,
+        )]));
+
+        assert!(matches!(
+            values
+                .get(&4)
+                .and_then(|values| values.get("load_instruction.load_scalar_single.sample_pct")),
             Some(MetricValue::Number(value)) if (value - 100.0).abs() < f64::EPSILON
         ));
     }
@@ -3154,6 +3495,7 @@ mod tests {
             pmu_values: BTreeMap::new(),
             spe_values: BTreeMap::new(),
             instruction_values: BTreeMap::new(),
+            load_instruction_values: BTreeMap::new(),
             detail: String::new(),
         }];
         let mut warnings = Vec::new();

@@ -1654,6 +1654,7 @@ mod tests {
                     ),
                 ]),
                 instruction_values: BTreeMap::new(),
+                load_instruction_values: BTreeMap::new(),
                 detail: String::new(),
             }],
             files: Vec::new(),
@@ -1663,6 +1664,7 @@ mod tests {
             spe_cpu_category_values: BTreeMap::new(),
             spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -1707,6 +1709,7 @@ mod tests {
             ]),
             spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -1765,6 +1768,7 @@ mod tests {
             )]),
             spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -1822,6 +1826,7 @@ mod tests {
             )]),
             spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -1854,6 +1859,7 @@ mod tests {
             )]),
             spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -1906,6 +1912,7 @@ mod tests {
                     ),
                 ]),
             )]),
+            load_cpu_kind_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
         let output = root.join("target/source_profile_tests/SourceLine.instruction_class.html");
@@ -1962,6 +1969,7 @@ mod tests {
                     MetricValue::Number(100.0),
                 )]),
                 instruction_values: BTreeMap::new(),
+                load_instruction_values: BTreeMap::new(),
                 detail: String::new(),
             }],
             files: Vec::new(),
@@ -1971,6 +1979,7 @@ mod tests {
             spe_cpu_category_values: BTreeMap::new(),
             spe_cpu_category_histograms: BTreeMap::new(),
             instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
         let output = root.join("target/source_profile_tests/SourceLine.compute_unknown.html");

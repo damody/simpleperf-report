@@ -51,6 +51,7 @@ pub fn write_html_summary_from_model(
     ];
     default_source_columns.extend(raw_pmu_columns.iter().cloned());
     default_source_columns.extend(derived_pmu_columns.iter().cloned());
+    default_source_columns.extend(default_spe_source_columns(&spe_columns));
     default_source_columns.push("code".to_string());
     let default_source_columns_json =
         serde_json::to_string(&default_source_columns).unwrap_or_else(|_| "[]".to_string());
@@ -593,6 +594,31 @@ pub fn write_html_summary_from_model(
         callchain_rows = callchain_rows_html(&model.callchains)
     );
     fs::write(output, html).with_context(|| format!("Failed to write '{}'", output.display()))
+}
+
+fn default_spe_source_columns(spe_columns: &[String]) -> Vec<String> {
+    [
+        "spe_sample_count",
+        "spe_latency_cycles_avg",
+        "spe_decode_errors",
+        "cpu_instruction.est_time_pct",
+        "load_l1.est_time_pct",
+        "load_l2.est_time_pct",
+        "load_l3.est_time_pct",
+        "load_llc.est_time_pct",
+        "load_dram.est_time_pct",
+        "load_unknown.est_time_pct",
+        "store_l1.est_time_pct",
+        "store_l2.est_time_pct",
+        "store_l3.est_time_pct",
+        "store_llc.est_time_pct",
+        "store_dram.est_time_pct",
+        "store_unknown.est_time_pct",
+    ]
+    .into_iter()
+    .filter(|key| spe_columns.iter().any(|column| column == key))
+    .map(str::to_string)
+    .collect()
 }
 
 fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
@@ -1141,6 +1167,22 @@ mod tests {
         assert!(!default_columns.contains("\"file_p_pct\""));
         assert!(!default_columns.contains("\"file_acc_p_pct\""));
         assert!(!default_columns.contains("\"status\""));
+        assert!(default_columns.contains("\"spe_sample_count\""));
+        assert!(default_columns.contains("\"spe_latency_cycles_avg\""));
+        assert!(default_columns.contains("\"spe_decode_errors\""));
+        assert!(default_columns.contains("\"cpu_instruction.est_time_pct\""));
+        assert!(default_columns.contains("\"load_l1.est_time_pct\""));
+        assert!(default_columns.contains("\"load_l2.est_time_pct\""));
+        assert!(default_columns.contains("\"load_l3.est_time_pct\""));
+        assert!(default_columns.contains("\"load_llc.est_time_pct\""));
+        assert!(default_columns.contains("\"load_dram.est_time_pct\""));
+        assert!(default_columns.contains("\"load_unknown.est_time_pct\""));
+        assert!(default_columns.contains("\"store_l1.est_time_pct\""));
+        assert!(default_columns.contains("\"store_l2.est_time_pct\""));
+        assert!(default_columns.contains("\"store_l3.est_time_pct\""));
+        assert!(default_columns.contains("\"store_llc.est_time_pct\""));
+        assert!(default_columns.contains("\"store_dram.est_time_pct\""));
+        assert!(default_columns.contains("\"store_unknown.est_time_pct\""));
         assert!(html.contains("cpu_cycles"));
         assert!(html.contains("inst_retired"));
         assert!(!html.contains("stall_backend"));

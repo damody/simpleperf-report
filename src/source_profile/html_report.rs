@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use super::bundle::SourceProfileBundle;
 use super::metrics::MetricValue;
 use super::report_model::{
-    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, ReportModel,
+    build_report_model, instruction_class_column_keys, pmu_derived_column_keys,
+    pmu_raw_column_keys, ReportModel, INSTRUCTION_CLASS_METRICS, INSTRUCTION_CLASS_NAMES,
     SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES, SPE_COLUMNS,
 };
 use super::summary::SourceReportSummary;
@@ -39,7 +40,8 @@ pub fn write_html_summary_from_model(
     let derived_pmu_columns = pmu_derived_column_keys(bundle);
     let derived_pmu_columns_json =
         serde_json::to_string(&derived_pmu_columns).unwrap_or_else(|_| "[]".to_string());
-    let spe_columns = displayed_spe_column_keys(model);
+    let mut spe_columns = displayed_spe_column_keys(model);
+    spe_columns.extend(displayed_instruction_class_column_keys(model));
     let spe_columns_json = serde_json::to_string(&spe_columns).unwrap_or_else(|_| "[]".to_string());
     let mut default_source_columns = vec![
         "file".to_string(),
@@ -149,6 +151,14 @@ pub fn write_html_summary_from_model(
   <table class="spe-summary-table">
     <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th></tr>
     {spe_category_summary_rows}
+  </table>
+  </details>
+  <details class="report-section" open>
+  <summary>Instruction Class Summary</summary>
+  <p>Instruction classes are decoded from sampled PC opcodes. They are not root-cause inference.</p>
+  <table class="spe-summary-table">
+    <tr><th>CPU</th><th>Instruction class</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th></tr>
+    {instruction_class_summary_rows}
   </table>
   </details>
   <details class="report-section" open>
@@ -333,7 +343,7 @@ pub fn write_html_summary_from_model(
       renderSourceRows();
     }}
     function metricValue(row, key) {{
-      return row.pmu_values?.[key] ?? row.spe_values?.[key] ?? "Missing";
+      return row.pmu_values?.[key] ?? row.spe_values?.[key] ?? row.instruction_values?.[key] ?? "Missing";
     }}
     function visibleSourceColumnList() {{
       return SOURCE_COLUMNS.filter(column => visibleSourceColumns.has(column.key));
@@ -610,6 +620,7 @@ pub fn write_html_summary_from_model(
         default_source_columns_json = default_source_columns_json,
         spe_category_summary_rows =
             spe_category_summary_rows_html(model, manifest.lanes.spe.available),
+        instruction_class_summary_rows = instruction_class_summary_rows_html(model),
         column_help_rows =
             column_help_rows(bundle, &raw_pmu_columns, &derived_pmu_columns, &spe_columns),
         quality_rows = quality_rows(bundle),
@@ -660,6 +671,25 @@ fn default_spe_source_columns(spe_columns: &[String], model: &ReportModel) -> Ve
         }
     }
 
+    for class in INSTRUCTION_CLASS_NAMES {
+        for metric in [
+            "est_time_pct",
+            "min_latency_cycles",
+            "max_latency_cycles",
+            "avg_latency_cycles",
+            "std_latency_cycles",
+        ] {
+            let key = format!("instruction_class.{class}.{metric}");
+            if spe_columns.iter().any(|column| column == &key)
+                && !is_zero_or_absent_summary(&summarize_instruction_class_metric(
+                    model, &key, false,
+                ))
+            {
+                columns.push(key);
+            }
+        }
+    }
+
     columns
 }
 
@@ -687,6 +717,29 @@ fn displayed_spe_column_keys(model: &ReportModel) -> Vec<String> {
         );
     }
 
+    keys
+}
+
+fn displayed_instruction_class_column_keys(model: &ReportModel) -> Vec<String> {
+    let mut keys = Vec::new();
+    for class in INSTRUCTION_CLASS_NAMES {
+        let values = INSTRUCTION_CLASS_METRICS
+            .iter()
+            .map(|metric| {
+                let key = format!("instruction_class.{class}.{metric}");
+                summarize_instruction_class_metric(model, &key, *metric == "spe_latency_pct")
+            })
+            .collect::<Vec<_>>();
+        if values.iter().all(|value| is_zero_or_absent_summary(value)) {
+            continue;
+        }
+        keys.extend(instruction_class_column_keys().into_iter().filter(|key| {
+            key.strip_prefix("instruction_class.")
+                .and_then(|rest| rest.split_once('.'))
+                .map(|(name, _)| name == *class)
+                .unwrap_or(false)
+        }));
+    }
     keys
 }
 
@@ -740,12 +793,64 @@ fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> S
     rows.join("\n")
 }
 
+fn instruction_class_summary_rows_html(model: &ReportModel) -> String {
+    let metrics = [
+        ("sample_pct", false),
+        ("est_time_pct", false),
+        ("min_latency_cycles", false),
+        ("max_latency_cycles", false),
+        ("avg_latency_cycles", false),
+        ("std_latency_cycles", false),
+    ];
+    let rows = model
+        .instruction_cpu_class_values
+        .iter()
+        .flat_map(|(cpu, values_by_key)| {
+            INSTRUCTION_CLASS_NAMES.iter().filter_map(move |class| {
+                let values = metrics
+                    .iter()
+                    .map(|(metric, show_na)| {
+                        let key = format!("instruction_class.{class}.{metric}");
+                        summarize_spe_category_metric_from_values(values_by_key, &key, *show_na)
+                    })
+                    .collect::<Vec<_>>();
+                if values.iter().all(|value| is_zero_or_absent_summary(value)) {
+                    return None;
+                }
+                let cells = values
+                    .into_iter()
+                    .map(|value| format!("<td>{}</td>", escape_html(&value)))
+                    .collect::<Vec<_>>()
+                    .join("");
+                let row_shade = cpu_row_shade(*cpu);
+                Some(format!(
+                    "<tr class=\"cpu-shade-{row_shade}\"><td>{}</td><td><code>{}</code></td>{}</tr>",
+                    cpu,
+                    escape_html(class),
+                    cells
+                ))
+            })
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return "<tr><td colspan=\"8\">Missing</td></tr>".to_string();
+    }
+    rows.join("\n")
+}
+
 fn cpu_row_shade(cpu: u32) -> u32 {
     cpu % 6
 }
 
 fn is_zero_or_absent_summary(value: &str) -> bool {
-    matches!(value, "0.000%" | "0%" | "N/A" | "Missing" | "Unresolved")
+    if matches!(value, "N/A" | "Missing" | "Unresolved") {
+        return true;
+    }
+    value
+        .trim_end_matches('%')
+        .parse::<f64>()
+        .map(|number| number == 0.0)
+        .unwrap_or(false)
 }
 
 fn summarize_spe_category_metric(
@@ -760,6 +865,45 @@ fn summarize_spe_category_metric(
     let mut saw_undefined = false;
     for row in &model.rows {
         match row.spe_values.get(key) {
+            Some(MetricValue::Number(value)) => {
+                saw_number = true;
+                sum += value;
+            }
+            Some(MetricValue::Missing(_)) | None => saw_missing = true,
+            Some(MetricValue::Unresolved(_)) => saw_unresolved = true,
+            Some(MetricValue::Undefined(_)) => saw_undefined = true,
+        }
+    }
+    if saw_number {
+        return format_metric_for_summary(key, sum);
+    }
+    if saw_undefined && show_na_for_undefined {
+        return "N/A".to_string();
+    }
+    if saw_unresolved {
+        return "Unresolved".to_string();
+    }
+    if saw_missing {
+        return "Missing".to_string();
+    }
+    if saw_undefined {
+        return "N/A".to_string();
+    }
+    "Missing".to_string()
+}
+
+fn summarize_instruction_class_metric(
+    model: &ReportModel,
+    key: &str,
+    show_na_for_undefined: bool,
+) -> String {
+    let mut sum = 0.0;
+    let mut saw_number = false;
+    let mut saw_missing = false;
+    let mut saw_unresolved = false;
+    let mut saw_undefined = false;
+    for row in &model.rows {
+        match row.instruction_values.get(key) {
             Some(MetricValue::Number(value)) => {
                 saw_number = true;
                 sum += value;
@@ -978,6 +1122,11 @@ fn column_help_rows(
                 spe_category_metric_formula(key),
                 spe_category_metric_meaning(key),
             ),
+            _ if is_instruction_class_metric(key) => help_row(
+                &format!("`{key}`"),
+                instruction_class_metric_formula(key),
+                instruction_class_metric_meaning(key),
+            ),
             _ => help_row(
                 &format!("`{key}`"),
                 "SPE metric",
@@ -996,8 +1145,38 @@ fn column_help_rows(
 
 fn is_spe_category_metric(key: &str) -> bool {
     key.rsplit_once('.')
-        .map(|(_, metric)| SPE_CATEGORY_METRICS.contains(&metric))
+        .map(|(category, metric)| {
+            !category.starts_with("instruction_class.") && SPE_CATEGORY_METRICS.contains(&metric)
+        })
         .unwrap_or(false)
+}
+
+fn is_instruction_class_metric(key: &str) -> bool {
+    let Some((prefix, metric)) = key.rsplit_once('.') else {
+        return false;
+    };
+    prefix.starts_with("instruction_class.") && INSTRUCTION_CLASS_METRICS.contains(&metric)
+}
+
+fn instruction_class_metric_formula(key: &str) -> &'static str {
+    match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_pct") => "instruction-class SPE samples / total SPE samples",
+        Some("spe_latency_pct") => {
+            "instruction-class SPE latency cycles / total SPE latency cycles"
+        }
+        Some("est_time_pct") => "estimated time percentage",
+        Some("min_latency_cycles") => "minimum SPE latency cycles in this instruction class",
+        Some("max_latency_cycles") => "maximum SPE latency cycles in this instruction class",
+        Some("avg_latency_cycles") => "average SPE latency cycles in this instruction class",
+        Some("std_latency_cycles") => {
+            "population standard deviation of SPE latency cycles in this instruction class"
+        }
+        _ => "instruction-class SPE metric",
+    }
+}
+
+fn instruction_class_metric_meaning(_key: &str) -> &'static str {
+    "Instruction classes are decoded from sampled PC opcodes and are not root-cause inference."
 }
 
 fn spe_category_metric_formula(key: &str) -> &'static str {
@@ -1409,6 +1588,7 @@ mod tests {
                         MetricValue::Number(0.0),
                     ),
                 ]),
+                instruction_values: BTreeMap::new(),
                 detail: String::new(),
             }],
             files: Vec::new(),
@@ -1416,6 +1596,7 @@ mod tests {
             frames: Vec::new(),
             callchains: Vec::new(),
             spe_cpu_category_values: BTreeMap::new(),
+            instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -1458,6 +1639,7 @@ mod tests {
                     ]),
                 ),
             ]),
+            instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -1469,6 +1651,112 @@ mod tests {
         );
         assert!(!rows.contains("spe_latency"));
         assert!(!rows.contains("load_llc"));
+    }
+
+    #[test]
+    fn spe_summary_rows_hide_categories_with_zero_latency_values() {
+        let model = ReportModel {
+            rows: Vec::new(),
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::from([(
+                7,
+                BTreeMap::from([
+                    ("load_l1.sample_pct".to_string(), MetricValue::Number(25.0)),
+                    (
+                        "load_l1.est_time_pct".to_string(),
+                        MetricValue::Number(30.0),
+                    ),
+                    (
+                        "load_l1.min_latency_cycles".to_string(),
+                        MetricValue::Number(7.0),
+                    ),
+                    ("load_llc.sample_pct".to_string(), MetricValue::Number(0.0)),
+                    (
+                        "load_llc.est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_llc.min_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_llc.max_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_llc.avg_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_llc.std_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                ]),
+            )]),
+            instruction_cpu_class_values: BTreeMap::new(),
+            warnings: Vec::new(),
+        };
+
+        let rows = spe_category_summary_rows_html(&model, true);
+
+        assert!(rows.contains("<td><code>load_l1</code></td>"));
+        assert!(!rows.contains("<td><code>load_llc</code></td>"));
+    }
+
+    #[test]
+    fn html_contains_instruction_class_summary() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = ReportModel {
+            rows: Vec::new(),
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::new(),
+            instruction_cpu_class_values: BTreeMap::from([(
+                4,
+                BTreeMap::from([
+                    (
+                        "instruction_class.compute_fp_simd.sample_pct".to_string(),
+                        MetricValue::Number(75.0),
+                    ),
+                    (
+                        "instruction_class.compute_fp_simd.est_time_pct".to_string(),
+                        MetricValue::Number(80.0),
+                    ),
+                    (
+                        "instruction_class.compute_fp_simd.min_latency_cycles".to_string(),
+                        MetricValue::Number(10.0),
+                    ),
+                    (
+                        "instruction_class.compute_fp_simd.max_latency_cycles".to_string(),
+                        MetricValue::Number(40.0),
+                    ),
+                    (
+                        "instruction_class.compute_fp_simd.avg_latency_cycles".to_string(),
+                        MetricValue::Number(25.0),
+                    ),
+                    (
+                        "instruction_class.compute_fp_simd.std_latency_cycles".to_string(),
+                        MetricValue::Number(5.0),
+                    ),
+                ]),
+            )]),
+            warnings: Vec::new(),
+        };
+        let output = root.join("target/source_profile_tests/SourceLine.instruction_class.html");
+
+        write_html_summary_from_model(&bundle, &model, &output).unwrap();
+
+        let html = fs::read_to_string(output).unwrap();
+        assert!(html.contains("<summary>Instruction Class Summary</summary>"));
+        assert!(html.contains("<code>compute_fp_simd</code>"));
+        assert!(html.contains("Instruction classes are decoded from sampled PC opcodes"));
     }
 
     #[test]
@@ -1514,6 +1802,7 @@ mod tests {
                     "compute_unknown.sample_pct".to_string(),
                     MetricValue::Number(100.0),
                 )]),
+                instruction_values: BTreeMap::new(),
                 detail: String::new(),
             }],
             files: Vec::new(),
@@ -1521,6 +1810,7 @@ mod tests {
             frames: Vec::new(),
             callchains: Vec::new(),
             spe_cpu_category_values: BTreeMap::new(),
+            instruction_cpu_class_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
         let output = root.join("target/source_profile_tests/SourceLine.compute_unknown.html");

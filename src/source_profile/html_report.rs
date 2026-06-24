@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -140,7 +141,7 @@ pub fn write_html_summary_from_model(
   <details class="report-section" open>
   <summary>SPE Category Summary</summary>
   <table>
-    <tr><th>Category</th><th>sample%</th><th>spe_latency%</th><th>est_time%</th></tr>
+    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th></tr>
     {spe_category_summary_rows}
   </table>
   </details>
@@ -676,34 +677,34 @@ fn displayed_spe_column_keys(model: &ReportModel) -> Vec<String> {
 }
 
 fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
-    let metrics = [
-        ("sample_pct", false),
-        ("spe_latency_pct", true),
-        ("est_time_pct", false),
-    ];
-    let rows = SPE_CATEGORY_NAMES
+    let metrics = [("sample_pct", false), ("est_time_pct", false)];
+    let rows = model
+        .spe_cpu_category_values
         .iter()
-        .filter_map(|category| {
-            let values = metrics
-                .iter()
-                .map(|(metric, show_na)| {
-                    let key = format!("{category}.{metric}");
-                    summarize_spe_category_metric(model, &key, *show_na)
-                })
-                .collect::<Vec<_>>();
-            if values.iter().all(|value| is_zero_or_absent_summary(value)) {
-                return None;
-            }
-            let cells = values
-                .into_iter()
-                .map(|value| format!("<td>{}</td>", escape_html(&value)))
-                .collect::<Vec<_>>()
-                .join("");
-            Some(format!(
-                "<tr><td><code>{}</code></td>{}</tr>",
-                escape_html(category),
-                cells
-            ))
+        .flat_map(|(cpu, values_by_key)| {
+            SPE_CATEGORY_NAMES.iter().filter_map(move |category| {
+                let values = metrics
+                    .iter()
+                    .map(|(metric, show_na)| {
+                        let key = format!("{category}.{metric}");
+                        summarize_spe_category_metric_from_values(values_by_key, &key, *show_na)
+                    })
+                    .collect::<Vec<_>>();
+                if values.iter().all(|value| is_zero_or_absent_summary(value)) {
+                    return None;
+                }
+                let cells = values
+                    .into_iter()
+                    .map(|value| format!("<td>{}</td>", escape_html(&value)))
+                    .collect::<Vec<_>>()
+                    .join("");
+                Some(format!(
+                    "<tr><td>{}</td><td><code>{}</code></td>{}</tr>",
+                    cpu,
+                    escape_html(category),
+                    cells
+                ))
+            })
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
@@ -758,6 +759,20 @@ fn summarize_spe_category_metric(
         return "N/A".to_string();
     }
     "Missing".to_string()
+}
+
+fn summarize_spe_category_metric_from_values(
+    values: &BTreeMap<String, MetricValue>,
+    key: &str,
+    show_na_for_undefined: bool,
+) -> String {
+    match values.get(key) {
+        Some(MetricValue::Number(value)) => format_percentage_for_summary(*value),
+        Some(MetricValue::Undefined(_)) if show_na_for_undefined => "N/A".to_string(),
+        Some(MetricValue::Unresolved(_)) => "Unresolved".to_string(),
+        Some(MetricValue::Missing(_)) | None => "Missing".to_string(),
+        Some(MetricValue::Undefined(_)) => "N/A".to_string(),
+    }
 }
 
 fn format_percentage_for_summary(value: f64) -> String {
@@ -1169,8 +1184,8 @@ mod tests {
         assert!(summary_pos < spe_summary_pos);
         assert!(spe_summary_pos < column_help_pos);
         assert!(column_help_pos < source_lines_pos);
-        assert!(html
-            .contains("<th>Category</th><th>sample%</th><th>spe_latency%</th><th>est_time%</th>"));
+        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th>"));
+        assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
         assert!(html.contains("<tr><td colspan=\"4\">Missing</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
@@ -1337,6 +1352,7 @@ mod tests {
             functions: Vec::new(),
             frames: Vec::new(),
             callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::new(),
             warnings: Vec::new(),
         };
 
@@ -1344,6 +1360,50 @@ mod tests {
 
         assert!(columns.contains(&"load_l1.est_time_pct".to_string()));
         assert!(!columns.contains(&"load_llc.est_time_pct".to_string()));
+    }
+
+    #[test]
+    fn spe_summary_rows_are_split_by_cpu_without_latency_column() {
+        let model = ReportModel {
+            rows: Vec::new(),
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::from([
+                (
+                    0,
+                    BTreeMap::from([
+                        ("load_l1.sample_pct".to_string(), MetricValue::Number(25.0)),
+                        (
+                            "load_l1.est_time_pct".to_string(),
+                            MetricValue::Number(40.0),
+                        ),
+                    ]),
+                ),
+                (
+                    3,
+                    BTreeMap::from([
+                        (
+                            "store_dram.sample_pct".to_string(),
+                            MetricValue::Number(10.0),
+                        ),
+                        (
+                            "store_dram.est_time_pct".to_string(),
+                            MetricValue::Number(60.0),
+                        ),
+                    ]),
+                ),
+            ]),
+            warnings: Vec::new(),
+        };
+
+        let rows = spe_category_summary_rows_html(&model, true);
+
+        assert!(rows.contains("<tr><td>0</td><td><code>load_l1</code></td>"));
+        assert!(rows.contains("<tr><td>3</td><td><code>store_dram</code></td>"));
+        assert!(!rows.contains("spe_latency"));
+        assert!(!rows.contains("load_llc"));
     }
 
     #[test]

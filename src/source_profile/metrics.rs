@@ -521,6 +521,8 @@ fn aggregate_one_pmu_sample(
 
 #[derive(Debug, Default, Clone)]
 pub struct SpeAddressAggregate {
+    pub cpus: BTreeSet<u32>,
+    pub tids: BTreeSet<u32>,
     pub sample_count: u64,
     pub latency_cycles_sum: u64,
     pub latency_sample_count: u64,
@@ -588,6 +590,7 @@ pub struct SpeCategoryAggregate {
 pub struct SpeAddressCategoryAggregate {
     pub sample_count: u64,
     pub categories: BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
+    pub cpu_categories: BTreeMap<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>,
 }
 
 pub fn aggregate_spe_by_address(
@@ -600,6 +603,8 @@ pub fn aggregate_spe_by_address(
             ip: sample.pc,
         };
         let row: &mut SpeAddressAggregate = rows.entry(key).or_default();
+        row.cpus.insert(sample.cpu);
+        row.tids.insert(sample.tid);
         row.sample_count += 1;
         if let Some(latency) = sample.latency_cycles {
             row.latency_cycles_sum += u64::from(latency);
@@ -710,6 +715,17 @@ pub fn aggregate_spe_categories_by_address(
         if let Some(latency) = sample.latency_cycles {
             category_row.latency_cycles_sum += u64::from(latency);
             category_row.latency_sample_count += 1;
+        }
+        let cpu_category_row = row
+            .cpu_categories
+            .entry(sample.cpu)
+            .or_default()
+            .entry(category)
+            .or_default();
+        cpu_category_row.sample_count += 1;
+        if let Some(latency) = sample.latency_cycles {
+            cpu_category_row.latency_cycles_sum += u64::from(latency);
+            cpu_category_row.latency_sample_count += 1;
         }
     }
     rows

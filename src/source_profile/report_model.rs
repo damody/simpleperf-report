@@ -183,6 +183,7 @@ pub struct ReportModel {
     pub functions: Vec<ReportFunctionRow>,
     pub frames: Vec<ReportFrameRow>,
     pub callchains: Vec<ReportCallchainRow>,
+    pub spe_cpu_category_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
     pub warnings: Vec<String>,
 }
 
@@ -281,6 +282,7 @@ struct MutableLineRow {
     pmu_sample_count: u64,
     spe: Option<SpeAddressAggregate>,
     spe_categories: BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
+    spe_cpu_categories: BTreeMap<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>,
     unresolved: Vec<String>,
 }
 
@@ -323,6 +325,7 @@ impl MutableLineRow {
             pmu_sample_count: 0,
             spe: None,
             spe_categories: BTreeMap::new(),
+            spe_cpu_categories: BTreeMap::new(),
             unresolved: Vec::new(),
         }
     }
@@ -442,9 +445,6 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
 
         phase_start = Instant::now();
         for (key, aggregate) in aggregates {
-            let sample_meta = samples
-                .iter()
-                .find(|sample| sample.mapping_id == key.mapping_id && sample.pc == key.ip);
             if let Some((file, line, function, module)) = resolve_key(
                 bundle,
                 &elf_matches,
@@ -461,10 +461,6 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                     .or_insert_with(|| MutableLineRow::new(file.clone(), line, code));
                 if row.code.is_empty() {
                     row.code = source_code_cache.line_code(&file, line);
-                }
-                if let Some(sample) = sample_meta {
-                    row.cpus.insert(sample.cpu);
-                    row.tids.insert(sample.tid);
                 }
                 row.function = prefer_nonempty(&row.function, function);
                 row.module = prefer_nonempty(&row.module, module);
@@ -483,6 +479,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     }
 
     phase_start = Instant::now();
+    let spe_cpu_category_values = make_spe_cpu_category_values(&rows);
     let mut line_rows = finalize_rows(bundle, rows);
     compute_row_percentages(&mut line_rows);
     append_attribution_diagnostics(bundle, &line_rows, &mut warnings);
@@ -496,6 +493,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         functions,
         frames,
         callchains,
+        spe_cpu_category_values,
         warnings,
     })
 }
@@ -1069,6 +1067,8 @@ fn merge_pmu(row: &mut MutableLineRow, aggregate: PmuAddressAggregate) {
 
 fn merge_spe(row: &mut MutableLineRow, aggregate: SpeAddressAggregate) {
     let row_spe = row.spe.get_or_insert_with(SpeAddressAggregate::default);
+    row.cpus.extend(aggregate.cpus);
+    row.tids.extend(aggregate.tids);
     row_spe.sample_count = row_spe.sample_count.saturating_add(aggregate.sample_count);
     row_spe.latency_cycles_sum = row_spe
         .latency_cycles_sum
@@ -1107,6 +1107,63 @@ fn merge_spe_categories(row: &mut MutableLineRow, aggregate: SpeAddressCategoryA
             .latency_sample_count
             .saturating_add(category_aggregate.latency_sample_count);
     }
+    for (cpu, categories) in aggregate.cpu_categories {
+        let row_cpu_categories = row.spe_cpu_categories.entry(cpu).or_default();
+        for (category, category_aggregate) in categories {
+            let row_category = row_cpu_categories.entry(category).or_default();
+            row_category.sample_count = row_category
+                .sample_count
+                .saturating_add(category_aggregate.sample_count);
+            row_category.latency_cycles_sum = row_category
+                .latency_cycles_sum
+                .saturating_add(category_aggregate.latency_cycles_sum);
+            row_category.latency_sample_count = row_category
+                .latency_sample_count
+                .saturating_add(category_aggregate.latency_sample_count);
+        }
+    }
+}
+
+fn make_spe_cpu_category_values(
+    rows: &BTreeMap<(PathBuf, u32), MutableLineRow>,
+) -> BTreeMap<u32, BTreeMap<String, MetricValue>> {
+    let mut cpu_categories =
+        BTreeMap::<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>::new();
+    for row in rows.values() {
+        for (cpu, categories) in &row.spe_cpu_categories {
+            let cpu_category_map = cpu_categories.entry(*cpu).or_default();
+            for (category, category_aggregate) in categories {
+                let cpu_category = cpu_category_map.entry(*category).or_default();
+                cpu_category.sample_count = cpu_category
+                    .sample_count
+                    .saturating_add(category_aggregate.sample_count);
+                cpu_category.latency_cycles_sum = cpu_category
+                    .latency_cycles_sum
+                    .saturating_add(category_aggregate.latency_cycles_sum);
+                cpu_category.latency_sample_count = cpu_category
+                    .latency_sample_count
+                    .saturating_add(category_aggregate.latency_sample_count);
+            }
+        }
+    }
+
+    cpu_categories
+        .into_iter()
+        .map(|(cpu, categories)| {
+            let total_samples = categories
+                .values()
+                .map(|category| category.sample_count)
+                .sum::<u64>();
+            let total_latency_cycles = categories
+                .values()
+                .map(|category| category.latency_cycles_sum)
+                .sum::<u64>();
+            (
+                cpu,
+                make_spe_category_values(&categories, total_samples, total_latency_cycles),
+            )
+        })
+        .collect()
 }
 
 fn append_cpu_coverage_diagnostic(
@@ -1901,6 +1958,7 @@ mod tests {
             pmu_sample_count: 2,
             spe: None,
             spe_categories: BTreeMap::new(),
+            spe_cpu_categories: BTreeMap::new(),
             unresolved: Vec::new(),
         };
         let rows = finalize_rows(

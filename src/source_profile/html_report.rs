@@ -45,8 +45,6 @@ pub fn write_html_summary_from_model(
     spe_columns.extend(displayed_instruction_class_column_keys(model));
     spe_columns.extend(displayed_load_instruction_column_keys(model));
     let spe_columns_json = serde_json::to_string(&spe_columns).unwrap_or_else(|_| "[]".to_string());
-    let spe_category_histograms_json = serde_json::to_string(&model.spe_cpu_category_histograms)
-        .unwrap_or_else(|_| "{}".to_string());
     let spe_hierarchy_histograms_json =
         serde_json::to_string(&model.spe_hierarchical_cpu_histograms)
             .unwrap_or_else(|_| "{}".to_string());
@@ -124,7 +122,6 @@ pub fn write_html_summary_from_model(
     .spe-summary-table tbody tr.cpu-shade-3 td {{ background: #fff8fb; }}
     .spe-summary-table tbody tr.cpu-shade-4 td {{ background: #f8fbfa; }}
     .spe-summary-table tbody tr.cpu-shade-5 td {{ background: #fbf8ff; }}
-    .spe-summary-table tbody tr[data-spe-category],
     .spe-summary-table tbody tr[data-spe-parent] {{ cursor: pointer; }}
     .spe-child-label {{ padding-left: 24px; }}
     .spe-summary-table tbody tr.selected td {{ outline: 2px solid #2563eb; outline-offset: -2px; }}
@@ -283,7 +280,6 @@ pub fn write_html_summary_from_model(
     const RAW_PMU_COLUMNS = {raw_pmu_columns_json};
     const DERIVED_PMU_COLUMNS = {derived_pmu_columns_json};
     const SPE_COLUMNS = {spe_columns_json};
-    const SPE_CATEGORY_HISTOGRAMS = {spe_category_histograms_json};
     const SPE_HIERARCHY_HISTOGRAMS = {spe_hierarchy_histograms_json};
     const SOURCE_COLUMNS = [
       {{ key: "file", label: "File", cls: "col-file truncate", value: row => row.file }},
@@ -379,27 +375,6 @@ pub fn write_html_summary_from_model(
         return `<div class="spe-histogram-row"><div class="spe-histogram-label">${{start}}-${{end}}</div><div class="spe-histogram-bar-track"><div class="spe-histogram-bar" style="width:${{width}}%"></div></div><div class="spe-histogram-count">${{count}}</div></div>`;
       }}).join("");
       panel.innerHTML = `<div class="spe-histogram-title">${{title}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})</div>${{rows}}`;
-    }}
-    function renderSpeCategoryHistogram(row) {{
-      document.querySelectorAll(".spe-summary-table tr.selected").forEach(active => active.classList.remove("selected"));
-      row.classList.add("selected");
-      const cpu = row.dataset.speCpu;
-      const category = row.dataset.speCategory;
-      const histogram = SPE_CATEGORY_HISTOGRAMS?.[cpu]?.[category];
-      const panel = document.getElementById("speCategoryHistogram");
-      if (!histogram || !Array.isArray(histogram.bins) || histogram.bins.length === 0) {{
-        panel.innerHTML = `<div class="spe-histogram-title">CPU ${{escapeText(cpu)}} / ${{escapeText(category)}}</div><div>No latency histogram data</div>`;
-        return;
-      }}
-      const maxCount = Math.max(...histogram.bins.map(bin => Number(bin.count) || 0), 1);
-      const rows = histogram.bins.map(bin => {{
-        const count = Number(bin.count) || 0;
-        const width = Math.max(2, count / maxCount * 100);
-        const start = formatMetric(bin.start_latency_cycles);
-        const end = formatMetric(bin.end_latency_cycles);
-        return `<div class="spe-histogram-row"><div class="spe-histogram-label">${{start}}-${{end}}</div><div class="spe-histogram-bar-track"><div class="spe-histogram-bar" style="width:${{width}}%"></div></div><div class="spe-histogram-count">${{count}}</div></div>`;
-      }}).join("");
-      panel.innerHTML = `<div class="spe-histogram-title">CPU ${{escapeText(cpu)}} / ${{escapeText(category)}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})</div>${{rows}}`;
     }}
     function metricValue(row, key) {{
       return row.pmu_values?.[key] ?? row.spe_values?.[key] ?? row.instruction_values?.[key] ?? "Missing";
@@ -676,7 +651,6 @@ pub fn write_html_summary_from_model(
         raw_pmu_columns_json = raw_pmu_columns_json,
         derived_pmu_columns_json = derived_pmu_columns_json,
         spe_columns_json = spe_columns_json,
-        spe_category_histograms_json = spe_category_histograms_json,
         spe_hierarchy_histograms_json = spe_hierarchy_histograms_json,
         default_source_columns_json = default_source_columns_json,
         spe_hierarchy_summary_rows =
@@ -845,62 +819,6 @@ fn displayed_load_instruction_column_keys(model: &ReportModel) -> Vec<String> {
     keys
 }
 
-fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
-    let metrics = [
-        ("sample_pct", false),
-        ("est_time_pct", false),
-        ("min_latency_cycles", false),
-        ("max_latency_cycles", false),
-        ("avg_latency_cycles", false),
-        ("std_latency_cycles", false),
-        ("p95_latency_cycles", false),
-        ("p99_latency_cycles", false),
-        ("over_p95_est_time_pct", false),
-        ("over_avg_est_time_pct", false),
-    ];
-    let rows = model
-        .spe_cpu_category_values
-        .iter()
-        .flat_map(|(cpu, values_by_key)| {
-            SPE_CATEGORY_NAMES.iter().filter_map(move |category| {
-                let values = metrics
-                    .iter()
-                    .map(|(metric, show_na)| {
-                        let key = format!("{category}.{metric}");
-                        summarize_spe_category_metric_from_values(values_by_key, &key, *show_na)
-                    })
-                    .collect::<Vec<_>>();
-                if values.iter().all(|value| is_zero_or_absent_summary(value)) {
-                    return None;
-                }
-                let cells = values
-                    .into_iter()
-                    .map(|value| format!("<td>{}</td>", escape_html(&value)))
-                    .collect::<Vec<_>>()
-                    .join("");
-                let row_shade = cpu_row_shade(*cpu);
-                Some(format!(
-                    "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-category=\"{}\" onclick=\"renderSpeCategoryHistogram(this)\"><td>{}</td><td><code>{}</code></td>{}</tr>",
-                    cpu,
-                    escape_html(category),
-                    cpu,
-                    escape_html(category),
-                    cells
-                ))
-            })
-        })
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        let status = if spe_available {
-            "No SPE category rows"
-        } else {
-            "Missing"
-        };
-        return format!("<tr><td colspan=\"12\">{status}</td></tr>");
-    }
-    rows.join("\n")
-}
-
 fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
     let metrics = [
         ("sample_pct", false),
@@ -990,110 +908,6 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         .collect::<Vec<_>>();
     if rows.is_empty() {
         return "<tr><td colspan=\"11\">No SPE hierarchy samples</td></tr>".to_string();
-    }
-    rows.join("\n")
-}
-
-fn instruction_class_summary_rows_html(model: &ReportModel) -> String {
-    let metrics = [
-        ("sample_pct", false),
-        ("est_time_pct", false),
-        ("min_latency_cycles", false),
-        ("max_latency_cycles", false),
-        ("avg_latency_cycles", false),
-        ("std_latency_cycles", false),
-        ("p95_latency_cycles", false),
-        ("p99_latency_cycles", false),
-        ("over_p95_est_time_pct", false),
-        ("over_avg_est_time_pct", false),
-    ];
-    let rows = model
-        .instruction_cpu_class_values
-        .iter()
-        .flat_map(|(cpu, values_by_key)| {
-            INSTRUCTION_CLASS_NAMES.iter().filter_map(move |class| {
-                let values = metrics
-                    .iter()
-                    .map(|(metric, show_na)| {
-                        let key = format!("instruction_class.{class}.{metric}");
-                        summarize_spe_category_metric_from_values(values_by_key, &key, *show_na)
-                    })
-                    .collect::<Vec<_>>();
-                if values.iter().all(|value| is_zero_or_absent_summary(value)) {
-                    return None;
-                }
-                let cells = values
-                    .into_iter()
-                    .map(|value| format!("<td>{}</td>", escape_html(&value)))
-                    .collect::<Vec<_>>()
-                    .join("");
-                let row_shade = cpu_row_shade(*cpu);
-                Some(format!(
-                    "<tr class=\"cpu-shade-{row_shade}\"><td>{}</td><td><code>{}</code></td>{}</tr>",
-                    cpu,
-                    escape_html(class),
-                    cells
-                ))
-            })
-        })
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        return "<tr><td colspan=\"12\">Missing</td></tr>".to_string();
-    }
-    rows.join("\n")
-}
-
-fn load_instruction_summary_rows_html(model: &ReportModel) -> String {
-    let metrics = [
-        ("sample_pct", false),
-        ("est_time_pct", false),
-        ("min_latency_cycles", false),
-        ("max_latency_cycles", false),
-        ("avg_latency_cycles", false),
-        ("std_latency_cycles", false),
-        ("p95_latency_cycles", false),
-        ("p99_latency_cycles", false),
-        ("over_p95_est_time_pct", false),
-        ("over_avg_est_time_pct", false),
-    ];
-    let rows = model
-        .load_cpu_kind_values
-        .iter()
-        .flat_map(|(cpu, values_by_key)| {
-            LOAD_INSTRUCTION_KIND_NAMES
-                .iter()
-                .filter_map(move |kind| {
-                    let values = metrics
-                        .iter()
-                        .map(|(metric, show_na)| {
-                            let key = format!("load_instruction.{kind}.{metric}");
-                            summarize_spe_category_metric_from_values(
-                                values_by_key,
-                                &key,
-                                *show_na,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    if values.iter().all(|value| is_zero_or_absent_summary(value)) {
-                        return None;
-                    }
-                    let cells = values
-                        .into_iter()
-                        .map(|value| format!("<td>{}</td>", escape_html(&value)))
-                        .collect::<Vec<_>>()
-                        .join("");
-                    let row_shade = cpu_row_shade(*cpu);
-                    Some(format!(
-                        "<tr class=\"cpu-shade-{row_shade}\"><td>{}</td><td><code>{}</code></td>{}</tr>",
-                        cpu,
-                        escape_html(kind),
-                        cells
-                    ))
-                })
-        })
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        return "<tr><td colspan=\"12\">Missing</td></tr>".to_string();
     }
     rows.join("\n")
 }
@@ -1989,214 +1803,6 @@ mod tests {
 
         assert!(columns.contains(&"load_l1.est_time_pct".to_string()));
         assert!(!columns.contains(&"load_llc.est_time_pct".to_string()));
-    }
-
-    #[test]
-    fn spe_summary_rows_are_split_by_cpu_without_latency_column() {
-        let model = ReportModel {
-            rows: Vec::new(),
-            files: Vec::new(),
-            functions: Vec::new(),
-            frames: Vec::new(),
-            callchains: Vec::new(),
-            spe_cpu_category_values: BTreeMap::from([
-                (
-                    0,
-                    BTreeMap::from([
-                        ("load_l1.sample_pct".to_string(), MetricValue::Number(25.0)),
-                        (
-                            "load_l1.est_time_pct".to_string(),
-                            MetricValue::Number(40.0),
-                        ),
-                    ]),
-                ),
-                (
-                    3,
-                    BTreeMap::from([
-                        (
-                            "store_dram.sample_pct".to_string(),
-                            MetricValue::Number(10.0),
-                        ),
-                        (
-                            "store_dram.est_time_pct".to_string(),
-                            MetricValue::Number(60.0),
-                        ),
-                    ]),
-                ),
-            ]),
-            spe_cpu_category_histograms: BTreeMap::new(),
-            spe_hierarchical_cpu_values: BTreeMap::new(),
-            spe_hierarchical_cpu_histograms: BTreeMap::new(),
-            instruction_cpu_class_values: BTreeMap::new(),
-            load_cpu_kind_values: BTreeMap::new(),
-            warnings: Vec::new(),
-        };
-
-        let rows = spe_category_summary_rows_html(&model, true);
-
-        assert!(rows.contains("<tr class=\"cpu-shade-0\" data-spe-cpu=\"0\" data-spe-category=\"load_l1\" onclick=\"renderSpeCategoryHistogram(this)\"><td>0</td><td><code>load_l1</code></td>"));
-        assert!(
-            rows.contains("<tr class=\"cpu-shade-3\" data-spe-cpu=\"3\" data-spe-category=\"store_dram\" onclick=\"renderSpeCategoryHistogram(this)\"><td>3</td><td><code>store_dram</code></td>")
-        );
-        assert!(!rows.contains("spe_latency"));
-        assert!(!rows.contains("load_llc"));
-    }
-
-    #[test]
-    fn spe_summary_rows_hide_categories_with_zero_latency_values() {
-        let model = ReportModel {
-            rows: Vec::new(),
-            files: Vec::new(),
-            functions: Vec::new(),
-            frames: Vec::new(),
-            callchains: Vec::new(),
-            spe_cpu_category_values: BTreeMap::from([(
-                7,
-                BTreeMap::from([
-                    ("load_l1.sample_pct".to_string(), MetricValue::Number(25.0)),
-                    (
-                        "load_l1.est_time_pct".to_string(),
-                        MetricValue::Number(30.0),
-                    ),
-                    (
-                        "load_l1.min_latency_cycles".to_string(),
-                        MetricValue::Number(7.0),
-                    ),
-                    ("load_llc.sample_pct".to_string(), MetricValue::Number(0.0)),
-                    (
-                        "load_llc.est_time_pct".to_string(),
-                        MetricValue::Number(0.0),
-                    ),
-                    (
-                        "load_llc.min_latency_cycles".to_string(),
-                        MetricValue::Number(0.0),
-                    ),
-                    (
-                        "load_llc.max_latency_cycles".to_string(),
-                        MetricValue::Number(0.0),
-                    ),
-                    (
-                        "load_llc.avg_latency_cycles".to_string(),
-                        MetricValue::Number(0.0),
-                    ),
-                    (
-                        "load_llc.std_latency_cycles".to_string(),
-                        MetricValue::Number(0.0),
-                    ),
-                ]),
-            )]),
-            spe_cpu_category_histograms: BTreeMap::new(),
-            spe_hierarchical_cpu_values: BTreeMap::new(),
-            spe_hierarchical_cpu_histograms: BTreeMap::new(),
-            instruction_cpu_class_values: BTreeMap::new(),
-            load_cpu_kind_values: BTreeMap::new(),
-            warnings: Vec::new(),
-        };
-
-        let rows = spe_category_summary_rows_html(&model, true);
-
-        assert!(rows.contains("<td><code>load_l1</code></td>"));
-        assert!(!rows.contains("<td><code>load_llc</code></td>"));
-    }
-
-    #[test]
-    fn spe_summary_rows_include_tail_latency_metrics() {
-        let model = ReportModel {
-            rows: Vec::new(),
-            files: Vec::new(),
-            functions: Vec::new(),
-            frames: Vec::new(),
-            callchains: Vec::new(),
-            spe_cpu_category_values: BTreeMap::from([(
-                7,
-                BTreeMap::from([
-                    ("load_l1.sample_pct".to_string(), MetricValue::Number(100.0)),
-                    (
-                        "load_l1.est_time_pct".to_string(),
-                        MetricValue::Number(100.0),
-                    ),
-                    (
-                        "load_l1.min_latency_cycles".to_string(),
-                        MetricValue::Number(10.0),
-                    ),
-                    (
-                        "load_l1.max_latency_cycles".to_string(),
-                        MetricValue::Number(200.0),
-                    ),
-                    (
-                        "load_l1.avg_latency_cycles".to_string(),
-                        MetricValue::Number(60.0),
-                    ),
-                    (
-                        "load_l1.std_latency_cycles".to_string(),
-                        MetricValue::Number(70.0),
-                    ),
-                    (
-                        "load_l1.p95_latency_cycles".to_string(),
-                        MetricValue::Number(200.0),
-                    ),
-                    (
-                        "load_l1.p99_latency_cycles".to_string(),
-                        MetricValue::Number(200.0),
-                    ),
-                    (
-                        "load_l1.over_p95_est_time_pct".to_string(),
-                        MetricValue::Number(20.0),
-                    ),
-                    (
-                        "load_l1.over_avg_est_time_pct".to_string(),
-                        MetricValue::Number(25.0),
-                    ),
-                ]),
-            )]),
-            spe_cpu_category_histograms: BTreeMap::new(),
-            spe_hierarchical_cpu_values: BTreeMap::new(),
-            spe_hierarchical_cpu_histograms: BTreeMap::new(),
-            instruction_cpu_class_values: BTreeMap::new(),
-            load_cpu_kind_values: BTreeMap::new(),
-            warnings: Vec::new(),
-        };
-
-        let rows = spe_category_summary_rows_html(&model, true);
-
-        assert!(rows.contains("<td>200.000</td><td>200.000</td><td>20.000%</td><td>25.000%</td>"));
-    }
-
-    #[test]
-    fn spe_summary_rows_are_clickable_for_histograms() {
-        let model = ReportModel {
-            rows: Vec::new(),
-            files: Vec::new(),
-            functions: Vec::new(),
-            frames: Vec::new(),
-            callchains: Vec::new(),
-            spe_cpu_category_values: BTreeMap::from([(
-                7,
-                BTreeMap::from([
-                    ("load_l1.sample_pct".to_string(), MetricValue::Number(100.0)),
-                    (
-                        "load_l1.est_time_pct".to_string(),
-                        MetricValue::Number(100.0),
-                    ),
-                    (
-                        "load_l1.min_latency_cycles".to_string(),
-                        MetricValue::Number(10.0),
-                    ),
-                ]),
-            )]),
-            spe_cpu_category_histograms: BTreeMap::new(),
-            spe_hierarchical_cpu_values: BTreeMap::new(),
-            spe_hierarchical_cpu_histograms: BTreeMap::new(),
-            instruction_cpu_class_values: BTreeMap::new(),
-            load_cpu_kind_values: BTreeMap::new(),
-            warnings: Vec::new(),
-        };
-
-        let rows = spe_category_summary_rows_html(&model, true);
-
-        assert!(rows.contains("data-spe-cpu=\"7\""));
-        assert!(rows.contains("data-spe-category=\"load_l1\""));
-        assert!(rows.contains("onclick=\"renderSpeCategoryHistogram"));
     }
 
     #[test]

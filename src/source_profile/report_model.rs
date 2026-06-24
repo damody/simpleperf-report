@@ -9,12 +9,16 @@ use anyhow::{Context, Result};
 use object::{Object, ObjectSymbol, SymbolKind};
 
 use super::bundle::SourceProfileBundle;
+use super::instruction_class::{
+    build_instruction_index_from_elf, InstructionClass, InstructionIndex,
+};
 use super::line_resolver::{
     resolve_source_path, runtime_address_to_relative, CachedElfLineResolver,
 };
 use super::metrics::{
-    aggregate_pmu_file, aggregate_spe_by_address, aggregate_spe_categories_by_address,
-    compute_percentages, derive_pmu_metrics, MetricValue, PmuAddressAggregate, SpeAddressAggregate,
+    aggregate_instruction_classes_by_address, aggregate_pmu_file, aggregate_spe_by_address,
+    aggregate_spe_categories_by_address, compute_percentages, derive_pmu_metrics,
+    InstructionClassAddressAggregate, MetricValue, PmuAddressAggregate, SpeAddressAggregate,
     SpeAddressCategoryAggregate, SpeCategoryAggregate, SpeReportCategory,
 };
 use super::sample_stream::{for_each_pmu_sample, read_spe_samples, PmuSample};
@@ -105,11 +109,41 @@ pub const SPE_CATEGORY_METRICS: &[&str] = &[
     "std_latency_cycles",
 ];
 
+pub const INSTRUCTION_CLASS_NAMES: &[&str] = &[
+    "compute_int",
+    "compute_fp_simd",
+    "compute_crypto",
+    "system_instruction",
+    "barrier_or_sync",
+    "scalar_load",
+    "scalar_store",
+    "vector_load",
+    "vector_store",
+    "atomic",
+    "acquire_release",
+    "prefetch",
+    "branch",
+    "unknown_instruction",
+    "missing_instruction",
+];
+
+pub const INSTRUCTION_CLASS_METRICS: &[&str] = SPE_CATEGORY_METRICS;
+
 pub fn spe_category_column_keys() -> Vec<String> {
     let mut keys = Vec::new();
     for category in SPE_CATEGORY_NAMES {
         for metric in SPE_CATEGORY_METRICS {
             keys.push(format!("{category}.{metric}"));
+        }
+    }
+    keys
+}
+
+pub fn instruction_class_column_keys() -> Vec<String> {
+    let mut keys = Vec::new();
+    for class in INSTRUCTION_CLASS_NAMES {
+        for metric in INSTRUCTION_CLASS_METRICS {
+            keys.push(format!("instruction_class.{class}.{metric}"));
         }
     }
     keys
@@ -192,6 +226,7 @@ pub struct ReportModel {
     pub frames: Vec<ReportFrameRow>,
     pub callchains: Vec<ReportCallchainRow>,
     pub spe_cpu_category_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
+    pub instruction_cpu_class_values: BTreeMap<u32, BTreeMap<String, MetricValue>>,
     pub warnings: Vec<String>,
 }
 
@@ -214,6 +249,7 @@ pub struct ReportLineRow {
     pub file_acc_p_pct: f64,
     pub pmu_values: BTreeMap<String, MetricValue>,
     pub spe_values: BTreeMap<String, MetricValue>,
+    pub instruction_values: BTreeMap<String, MetricValue>,
     pub detail: String,
 }
 
@@ -291,6 +327,8 @@ struct MutableLineRow {
     spe: Option<SpeAddressAggregate>,
     spe_categories: BTreeMap<SpeReportCategory, SpeCategoryAggregate>,
     spe_cpu_categories: BTreeMap<u32, BTreeMap<SpeReportCategory, SpeCategoryAggregate>>,
+    instruction_classes: BTreeMap<InstructionClass, SpeCategoryAggregate>,
+    instruction_cpu_classes: BTreeMap<u32, BTreeMap<InstructionClass, SpeCategoryAggregate>>,
     unresolved: Vec<String>,
 }
 
@@ -334,6 +372,8 @@ impl MutableLineRow {
             spe: None,
             spe_categories: BTreeMap::new(),
             spe_cpu_categories: BTreeMap::new(),
+            instruction_classes: BTreeMap::new(),
+            instruction_cpu_classes: BTreeMap::new(),
             unresolved: Vec::new(),
         }
     }
@@ -449,6 +489,17 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         let (_, samples) = read_spe_samples(path)?;
         let aggregates = aggregate_spe_by_address(&samples);
         let mut category_aggregates = aggregate_spe_categories_by_address(&samples);
+        let mut instruction_cache = InstructionIndexCache::default();
+        let mut instruction_aggregates =
+            aggregate_instruction_classes_by_address(&samples, |sample| {
+                instruction_cache.classify(
+                    bundle,
+                    &elf_matches,
+                    sample.mapping_id,
+                    sample.pc,
+                    &mut warnings,
+                )
+            });
         log_timing("build_model.spe_read_aggregate", phase_start.elapsed());
 
         phase_start = Instant::now();
@@ -475,6 +526,9 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 if let Some(categories) = category_aggregates.remove(&key) {
                     merge_spe_categories(row, categories);
                 }
+                if let Some(instruction_classes) = instruction_aggregates.remove(&key) {
+                    merge_instruction_classes(row, instruction_classes);
+                }
                 merge_spe(row, aggregate);
             } else {
                 warnings.push(format!(
@@ -488,6 +542,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
 
     phase_start = Instant::now();
     let spe_cpu_category_values = make_spe_cpu_category_values(&rows);
+    let instruction_cpu_class_values = make_instruction_cpu_class_values(&rows);
     let mut line_rows = finalize_rows(bundle, rows);
     compute_row_percentages(&mut line_rows);
     append_attribution_diagnostics(bundle, &line_rows, &mut warnings);
@@ -502,6 +557,7 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
         frames,
         callchains,
         spe_cpu_category_values,
+        instruction_cpu_class_values,
         warnings,
     })
 }
@@ -663,6 +719,63 @@ fn relative_address_for_mapping(mapping: &ProcessMapRecord, ip: u64) -> Option<u
         }
     } else {
         ip.checked_sub(mapping.start)?.checked_add(mapping.offset)
+    }
+}
+
+#[derive(Default)]
+struct InstructionIndexCache {
+    indexes: BTreeMap<PathBuf, Option<InstructionIndex>>,
+    warned_unavailable: bool,
+}
+
+impl InstructionIndexCache {
+    fn classify(
+        &mut self,
+        bundle: &SourceProfileBundle,
+        elf_matches: &BTreeMap<String, super::symbol_resolver::ElfMatch>,
+        mapping_id: u64,
+        runtime_pc: u64,
+        warnings: &mut Vec<String>,
+    ) -> InstructionClass {
+        let normalized_pc = normalize_aarch64_tagged_ip(runtime_pc);
+        let Some(mapping) = resolve_mapping_for_ip(&bundle.maps.maps, mapping_id, normalized_pc)
+        else {
+            return InstructionClass::MissingInstruction;
+        };
+        let Some(matched) = elf_matches.get(&mapping.module_id) else {
+            return InstructionClass::MissingInstruction;
+        };
+        let Some(path) = matched.candidate_path.as_ref() else {
+            return InstructionClass::MissingInstruction;
+        };
+        let Some(relative_address) = relative_address_for_mapping(mapping, normalized_pc) else {
+            return InstructionClass::MissingInstruction;
+        };
+
+        if !self.indexes.contains_key(path) {
+            let index = match build_instruction_index_from_elf(path, None) {
+                Ok(index) if !index.is_empty() => Some(index),
+                Ok(_) => {
+                    warnings.push(format!("Instruction index empty for {}", path.display()));
+                    None
+                }
+                Err(err) => {
+                    if !self.warned_unavailable {
+                        warnings.push(format!("Instruction indexing unavailable: {err:#}"));
+                        self.warned_unavailable = true;
+                    }
+                    None
+                }
+            };
+            self.indexes.insert(path.clone(), index);
+        }
+
+        self.indexes
+            .get(path)
+            .and_then(|index| index.as_ref())
+            .and_then(|index| index.lookup(relative_address))
+            .map(|instruction| instruction.class)
+            .unwrap_or(InstructionClass::MissingInstruction)
     }
 }
 
@@ -1116,6 +1229,23 @@ fn merge_spe_categories(row: &mut MutableLineRow, aggregate: SpeAddressCategoryA
     }
 }
 
+fn merge_instruction_classes(
+    row: &mut MutableLineRow,
+    aggregate: InstructionClassAddressAggregate,
+) {
+    for (class, class_aggregate) in aggregate.classes {
+        let row_class = row.instruction_classes.entry(class).or_default();
+        row_class.merge_from(&class_aggregate);
+    }
+    for (cpu, classes) in aggregate.cpu_classes {
+        let row_cpu_classes = row.instruction_cpu_classes.entry(cpu).or_default();
+        for (class, class_aggregate) in classes {
+            let row_class = row_cpu_classes.entry(class).or_default();
+            row_class.merge_from(&class_aggregate);
+        }
+    }
+}
+
 fn make_spe_cpu_category_values(
     rows: &BTreeMap<(PathBuf, u32), MutableLineRow>,
 ) -> BTreeMap<u32, BTreeMap<String, MetricValue>> {
@@ -1145,6 +1275,43 @@ fn make_spe_cpu_category_values(
             (
                 cpu,
                 make_spe_category_summary_values(&categories, total_samples, total_latency_cycles),
+            )
+        })
+        .collect()
+}
+
+fn make_instruction_cpu_class_values(
+    rows: &BTreeMap<(PathBuf, u32), MutableLineRow>,
+) -> BTreeMap<u32, BTreeMap<String, MetricValue>> {
+    let mut cpu_classes = BTreeMap::<u32, BTreeMap<InstructionClass, SpeCategoryAggregate>>::new();
+    for row in rows.values() {
+        for (cpu, classes) in &row.instruction_cpu_classes {
+            let cpu_class_map = cpu_classes.entry(*cpu).or_default();
+            for (class, class_aggregate) in classes {
+                let cpu_class = cpu_class_map.entry(*class).or_default();
+                cpu_class.merge_from(class_aggregate);
+            }
+        }
+    }
+
+    cpu_classes
+        .into_iter()
+        .map(|(cpu, classes)| {
+            let total_samples = classes
+                .values()
+                .map(|class| class.sample_count)
+                .sum::<u64>();
+            let total_latency_cycles = classes
+                .values()
+                .map(|class| class.latency_cycles_sum)
+                .sum::<u64>();
+            (
+                cpu,
+                make_instruction_class_distribution_values(
+                    &classes,
+                    total_samples,
+                    total_latency_cycles,
+                ),
             )
         })
         .collect()
@@ -1226,6 +1393,134 @@ fn spe_category_latency_metric_values(
     );
     values.insert(
         format!("{name}.std_latency_cycles"),
+        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::std_latency_cycles)),
+    );
+    values
+}
+
+fn make_instruction_class_summary_values(
+    by_class: &BTreeMap<InstructionClass, SpeCategoryAggregate>,
+    total_spe_samples: u64,
+    total_spe_latency_cycles: u64,
+    est_time_denominator_cycles: Option<f64>,
+    spe_effective_period: f64,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    for (class, name) in instruction_classes() {
+        let aggregate = by_class.get(&class);
+        let sample_count = aggregate.map(|value| value.sample_count).unwrap_or(0);
+        let latency_cycles = aggregate.map(|value| value.latency_cycles_sum).unwrap_or(0);
+        let latency_sample_count = aggregate
+            .map(|value| value.latency_sample_count)
+            .unwrap_or(0);
+        let sample_pct = percent(sample_count as f64, total_spe_samples as f64);
+        let spe_latency_pct = percent(latency_cycles as f64, total_spe_latency_cycles as f64);
+        let has_samples = sample_count > 0;
+        let has_latency = latency_sample_count > 0;
+
+        values.insert(
+            format!("instruction_class.{name}.sample_pct"),
+            MetricValue::Number(sample_pct),
+        );
+        values.insert(
+            format!("instruction_class.{name}.spe_latency_pct"),
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(spe_latency_pct)
+            },
+        );
+        values.insert(
+            format!("instruction_class.{name}.est_time_pct"),
+            category_est_time_value(
+                has_samples,
+                has_latency,
+                latency_cycles,
+                est_time_denominator_cycles,
+                spe_effective_period,
+            ),
+        );
+        values.extend(instruction_class_latency_metric_values(name, aggregate));
+    }
+    values
+}
+
+fn make_instruction_class_distribution_values(
+    by_class: &BTreeMap<InstructionClass, SpeCategoryAggregate>,
+    total_spe_samples: u64,
+    total_spe_latency_cycles: u64,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    for (class, name) in instruction_classes() {
+        let aggregate = by_class.get(&class);
+        let sample_count = aggregate.map(|value| value.sample_count).unwrap_or(0);
+        let latency_cycles = aggregate.map(|value| value.latency_cycles_sum).unwrap_or(0);
+        let latency_sample_count = aggregate
+            .map(|value| value.latency_sample_count)
+            .unwrap_or(0);
+        let sample_pct = percent(sample_count as f64, total_spe_samples as f64);
+        let est_time_pct = percent(latency_cycles as f64, total_spe_latency_cycles as f64);
+        let has_samples = sample_count > 0;
+        let has_latency = latency_sample_count > 0;
+
+        values.insert(
+            format!("instruction_class.{name}.sample_pct"),
+            MetricValue::Number(sample_pct),
+        );
+        values.insert(
+            format!("instruction_class.{name}.spe_latency_pct"),
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(est_time_pct)
+            },
+        );
+        values.insert(
+            format!("instruction_class.{name}.est_time_pct"),
+            if has_samples && !has_latency {
+                MetricValue::Missing("SPE latency field unavailable".to_string())
+            } else {
+                MetricValue::Number(est_time_pct)
+            },
+        );
+        values.extend(instruction_class_latency_metric_values(name, aggregate));
+    }
+    values
+}
+
+fn instruction_class_latency_metric_values(
+    name: &str,
+    aggregate: Option<&SpeCategoryAggregate>,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    let has_samples = aggregate
+        .map(|value| value.sample_count > 0)
+        .unwrap_or(false);
+    let has_latency = aggregate
+        .map(|value| value.latency_sample_count > 0)
+        .unwrap_or(false);
+    let missing_or_zero = |value: Option<f64>| {
+        if has_samples && !has_latency {
+            MetricValue::Missing("SPE latency field unavailable".to_string())
+        } else {
+            MetricValue::Number(value.unwrap_or(0.0))
+        }
+    };
+
+    values.insert(
+        format!("instruction_class.{name}.min_latency_cycles"),
+        missing_or_zero(aggregate.and_then(|value| value.latency_cycles_min.map(f64::from))),
+    );
+    values.insert(
+        format!("instruction_class.{name}.max_latency_cycles"),
+        missing_or_zero(aggregate.and_then(|value| value.latency_cycles_max.map(f64::from))),
+    );
+    values.insert(
+        format!("instruction_class.{name}.avg_latency_cycles"),
+        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::avg_latency_cycles)),
+    );
+    values.insert(
+        format!("instruction_class.{name}.std_latency_cycles"),
         missing_or_zero(aggregate.and_then(SpeCategoryAggregate::std_latency_cycles)),
     );
     values
@@ -1382,6 +1677,16 @@ fn finalize_rows(
         .flat_map(|row| row.spe_categories.values())
         .map(|category| category.latency_cycles_sum)
         .sum::<u64>();
+    let total_instruction_samples = rows
+        .values()
+        .flat_map(|row| row.instruction_classes.values())
+        .map(|class| class.sample_count)
+        .sum::<u64>();
+    let total_instruction_latency_cycles = rows
+        .values()
+        .flat_map(|row| row.instruction_classes.values())
+        .map(|class| class.latency_cycles_sum)
+        .sum::<u64>();
     rows.into_values()
         .map(|row| {
             let mut pmu_values = BTreeMap::new();
@@ -1416,14 +1721,31 @@ fn finalize_rows(
                 (total_pmu_cpu_cycles > 0.0).then_some(total_pmu_cpu_cycles),
                 spe_effective_period,
             );
+            let instruction_values = make_instruction_class_summary_values(
+                &row.instruction_classes,
+                total_instruction_samples,
+                total_instruction_latency_cycles,
+                (total_pmu_cpu_cycles > 0.0).then_some(total_pmu_cpu_cycles),
+                spe_effective_period,
+            );
             let self_weight = pmu_self_weight(&row) as f64;
             let accumulated_weight =
                 row.pmu_acc
                     .get("cpu_cycles")
                     .copied()
                     .unwrap_or_else(|| row.pmu_acc.values().copied().sum()) as f64;
-            let status = status_text(&pmu_values, &spe_values, !row.unresolved.is_empty());
-            let detail = metric_detail(&pmu_values, &spe_values, &row.unresolved);
+            let status = status_text(
+                &pmu_values,
+                &spe_values,
+                &instruction_values,
+                !row.unresolved.is_empty(),
+            );
+            let detail = metric_detail(
+                &pmu_values,
+                &spe_values,
+                &instruction_values,
+                &row.unresolved,
+            );
             ReportLineRow {
                 file: row.file.to_string_lossy().to_string(),
                 line: row.line,
@@ -1442,6 +1764,7 @@ fn finalize_rows(
                 file_acc_p_pct: 0.0,
                 pmu_values,
                 spe_values,
+                instruction_values,
                 detail,
             }
         })
@@ -1667,6 +1990,26 @@ fn spe_report_categories() -> [(SpeReportCategory, &'static str); 34] {
     ]
 }
 
+fn instruction_classes() -> [(InstructionClass, &'static str); 15] {
+    [
+        (InstructionClass::ComputeInt, "compute_int"),
+        (InstructionClass::ComputeFpSimd, "compute_fp_simd"),
+        (InstructionClass::ComputeCrypto, "compute_crypto"),
+        (InstructionClass::SystemInstruction, "system_instruction"),
+        (InstructionClass::BarrierOrSync, "barrier_or_sync"),
+        (InstructionClass::ScalarLoad, "scalar_load"),
+        (InstructionClass::ScalarStore, "scalar_store"),
+        (InstructionClass::VectorLoad, "vector_load"),
+        (InstructionClass::VectorStore, "vector_store"),
+        (InstructionClass::Atomic, "atomic"),
+        (InstructionClass::AcquireRelease, "acquire_release"),
+        (InstructionClass::Prefetch, "prefetch"),
+        (InstructionClass::Branch, "branch"),
+        (InstructionClass::UnknownInstruction, "unknown_instruction"),
+        (InstructionClass::MissingInstruction, "missing_instruction"),
+    ]
+}
+
 fn compute_row_percentages(rows: &mut [ReportLineRow]) {
     let total_self = rows.iter().map(|row| row.self_weight).sum::<f64>();
     let total_acc = rows.iter().map(|row| row.accumulated_weight).sum::<f64>();
@@ -1780,12 +2123,14 @@ pub fn metric_value_number(value: Option<&MetricValue>) -> Option<f64> {
 fn status_text(
     pmu_values: &BTreeMap<String, MetricValue>,
     spe_values: &BTreeMap<String, MetricValue>,
+    instruction_values: &BTreeMap<String, MetricValue>,
     unresolved: bool,
 ) -> String {
     let mut flags = Vec::new();
     if pmu_values
         .values()
         .chain(spe_values.values())
+        .chain(instruction_values.values())
         .any(|value| matches!(value, MetricValue::Number(number) if *number > 0.0))
     {
         flags.push("NonZero");
@@ -1793,6 +2138,7 @@ fn status_text(
     if pmu_values
         .values()
         .chain(spe_values.values())
+        .chain(instruction_values.values())
         .any(|value| matches!(value, MetricValue::Missing(_)))
     {
         flags.push("Missing");
@@ -1801,6 +2147,7 @@ fn status_text(
         || pmu_values
             .values()
             .chain(spe_values.values())
+            .chain(instruction_values.values())
             .any(|value| matches!(value, MetricValue::Unresolved(_)))
     {
         flags.push("Unresolved");
@@ -1808,6 +2155,7 @@ fn status_text(
     if pmu_values
         .values()
         .chain(spe_values.values())
+        .chain(instruction_values.values())
         .any(|value| matches!(value, MetricValue::Undefined(_)))
     {
         flags.push("Undefined");
@@ -1822,10 +2170,15 @@ fn status_text(
 fn metric_detail(
     pmu_values: &BTreeMap<String, MetricValue>,
     spe_values: &BTreeMap<String, MetricValue>,
+    instruction_values: &BTreeMap<String, MetricValue>,
     unresolved: &[String],
 ) -> String {
     let mut parts = Vec::new();
-    for (key, value) in pmu_values.iter().chain(spe_values.iter()) {
+    for (key, value) in pmu_values
+        .iter()
+        .chain(spe_values.iter())
+        .chain(instruction_values.iter())
+    {
         parts.push(format!("{key}={}", metric_value_text(Some(value))));
     }
     for item in unresolved {
@@ -2085,6 +2438,8 @@ mod tests {
             spe: None,
             spe_categories: BTreeMap::new(),
             spe_cpu_categories: BTreeMap::new(),
+            instruction_classes: BTreeMap::new(),
+            instruction_cpu_classes: BTreeMap::new(),
             unresolved: Vec::new(),
         };
         let rows = finalize_rows(
@@ -2218,6 +2573,43 @@ mod tests {
             Some(MetricValue::Missing(reason)) if reason.contains("PMU cpu_cycles")
         ));
         assert!(values.get("branch_unknown.pmu_cycles_pct").is_none());
+    }
+
+    #[test]
+    fn instruction_class_column_keys_include_latency_metrics() {
+        let keys = instruction_class_column_keys();
+
+        assert!(keys.contains(&"instruction_class.compute_fp_simd.sample_pct".to_string()));
+        assert!(keys.contains(&"instruction_class.vector_load.avg_latency_cycles".to_string()));
+        assert!(keys.contains(&"instruction_class.missing_instruction.est_time_pct".to_string()));
+    }
+
+    #[test]
+    fn instruction_class_summary_values_compute_percentages() {
+        let mut by_class = BTreeMap::new();
+        by_class.insert(
+            InstructionClass::ComputeFpSimd,
+            SpeCategoryAggregate {
+                sample_count: 2,
+                latency_cycles_sum: 60,
+                latency_sample_count: 2,
+                latency_cycles_square_sum: 2000.0,
+                latency_cycles_min: Some(20),
+                latency_cycles_max: Some(40),
+            },
+        );
+
+        let values =
+            make_instruction_class_summary_values(&by_class, 4, 120, Some(10_000.0), 100.0);
+
+        assert_eq!(
+            metric_value_number(values.get("instruction_class.compute_fp_simd.sample_pct")),
+            Some(50.0)
+        );
+        assert_eq!(
+            metric_value_number(values.get("instruction_class.compute_fp_simd.avg_latency_cycles")),
+            Some(30.0)
+        );
     }
 
     #[test]
@@ -2442,6 +2834,7 @@ mod tests {
             file_acc_p_pct: 0.0,
             pmu_values: BTreeMap::new(),
             spe_values: BTreeMap::new(),
+            instruction_values: BTreeMap::new(),
             detail: String::new(),
         }];
         let mut warnings = Vec::new();

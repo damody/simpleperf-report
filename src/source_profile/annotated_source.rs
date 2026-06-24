@@ -792,6 +792,7 @@ Add-Content -LiteralPath $path -Value "// formatter saw short path"
                 "spe_sample_count".to_string(),
                 MetricValue::Missing("SPE unavailable".to_string()),
             )]),
+            instruction_values: BTreeMap::new(),
             detail: String::new(),
         };
 

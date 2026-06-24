@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -8,7 +9,8 @@ use serde_json::json;
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, metric_value_text, pmu_column_keys, spe_column_keys,
+    build_report_model, instruction_class_column_keys, metric_value_text, pmu_column_keys,
+    spe_column_keys,
 };
 
 pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
@@ -28,7 +30,8 @@ pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Re
             "pmu_lane": bundle.manifest.lanes.pmu,
             "spe_lane": bundle.manifest.lanes.spe,
             "pmu_buffer_pages": bundle.manifest.capture_options.pmu_buffer_pages,
-            "spe_aux_buffer_bytes": bundle.manifest.capture_options.spe_aux_buffer_bytes
+            "spe_aux_buffer_bytes": bundle.manifest.capture_options.spe_aux_buffer_bytes,
+            "instruction_cpu_class_values": metric_values_by_cpu_text(&model.instruction_cpu_class_values)
         },
         "columns": columns(bundle),
         "rows": model.rows.iter().map(|row| row_to_values(row, bundle)).collect::<Vec<_>>(),
@@ -157,6 +160,7 @@ fn columns(bundle: &SourceProfileBundle) -> Vec<String> {
     ];
     columns.extend(pmu_column_keys(bundle));
     columns.extend(spe_column_keys());
+    columns.extend(instruction_class_column_keys());
     columns
 }
 
@@ -185,6 +189,9 @@ fn row_to_values(
     }
     for key in spe_column_keys() {
         values.push(metric_value_text(row.spe_values.get(&key)));
+    }
+    for key in instruction_class_column_keys() {
+        values.push(metric_value_text(row.instruction_values.get(&key)));
     }
     values
 }
@@ -263,6 +270,23 @@ fn callchain_to_values(row: &super::report_model::ReportCallchainRow) -> Vec<Str
     ]
 }
 
+fn metric_values_by_cpu_text(
+    values: &BTreeMap<u32, BTreeMap<String, super::metrics::MetricValue>>,
+) -> BTreeMap<u32, BTreeMap<String, String>> {
+    values
+        .iter()
+        .map(|(cpu, by_key)| {
+            (
+                *cpu,
+                by_key
+                    .iter()
+                    .map(|(key, value)| (key.clone(), metric_value_text(Some(value))))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
 fn write_csv<S: AsRef<str>>(path: &Path, headers: &[S], rows: &[Vec<String>]) -> Result<()> {
     let mut out = String::new();
     out.push_str(
@@ -311,5 +335,10 @@ mod tests {
         assert!(out.join("csv/AllLines.csv").exists());
         assert!(out.join("csv/Files.csv").exists());
         assert!(out.join("csv/Functions.csv").exists());
+        let text = fs::read_to_string(out.join("SourceLine.json")).unwrap();
+        assert!(
+            text.contains("instruction_class.compute_fp_simd.sample_pct")
+                || text.contains("instruction_values")
+        );
     }
 }

@@ -165,7 +165,7 @@ pub fn write_html_summary_from_model(
   <summary>SPE Hierarchical Breakdown</summary>
   <p>SPE parent rows are CPU-relative. Child rows are relative to their parent category.</p>
   <table class="spe-summary-table">
-    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th></tr>
+    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th></tr>
     {spe_hierarchy_summary_rows}
   </table>
   <div id="speHierarchyHistogram" class="spe-histogram-panel">Select a SPE breakdown row to view latency histogram.</div>
@@ -830,9 +830,10 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         ("p95_latency_cycles", false),
         ("p99_latency_cycles", false),
         ("over_p95_est_time_pct", false),
+        ("over_avg_est_time_pct", false),
     ];
     if !spe_available {
-        return "<tr><td colspan=\"11\">SPE samples unavailable</td></tr>".to_string();
+        return "<tr><td colspan=\"12\">SPE samples unavailable</td></tr>".to_string();
     }
 
     let rows = model
@@ -907,7 +908,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
-        return "<tr><td colspan=\"11\">No SPE hierarchy samples</td></tr>".to_string();
+        return "<tr><td colspan=\"12\">No SPE hierarchy samples</td></tr>".to_string();
     }
     rows.join("\n")
 }
@@ -1614,7 +1615,7 @@ mod tests {
         assert!(spe_summary_pos < column_help_pos);
         assert!(column_help_pos < source_lines_pos);
         assert!(html.contains("<table class=\"spe-summary-table\">"));
-        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th>"));
+        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th>"));
         assert!(html.contains("id=\"speHierarchyHistogram\""));
         assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS = "));
         assert!(html.contains("function renderSpeHierarchyHistogram"));
@@ -1623,7 +1624,7 @@ mod tests {
         assert!(!html.contains("<summary>Load Instruction Summary</summary>"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
-        assert!(html.contains("<tr><td colspan=\"11\">SPE samples unavailable</td></tr>"));
+        assert!(html.contains("<tr><td colspan=\"12\">SPE samples unavailable</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
         assert!(html
             .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
@@ -1877,6 +1878,10 @@ mod tests {
                         MetricValue::Number(25.0),
                     ),
                     (
+                        "load_l1.over_avg_est_time_pct".to_string(),
+                        MetricValue::Number(40.0),
+                    ),
+                    (
                         "load_l1.vector_load.sample_pct".to_string(),
                         MetricValue::Number(60.0),
                     ),
@@ -1911,6 +1916,10 @@ mod tests {
                     (
                         "load_l1.vector_load.over_p95_est_time_pct".to_string(),
                         MetricValue::Number(30.0),
+                    ),
+                    (
+                        "load_l1.vector_load.over_avg_est_time_pct".to_string(),
+                        MetricValue::Number(50.0),
                     ),
                 ]),
             )]),

@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
+use object::{Object, ObjectSection, SectionKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedInstruction {
@@ -37,6 +39,84 @@ impl InstructionIndex {
     pub fn is_empty(&self) -> bool {
         self.instructions.is_empty()
     }
+}
+
+#[derive(Debug)]
+pub struct SparseInstructionIndex {
+    mmap: memmap2::Mmap,
+    sections: Vec<InstructionSection>,
+}
+
+#[derive(Debug, Clone)]
+struct InstructionSection {
+    address: u64,
+    size: u64,
+    file_offset: u64,
+    file_size: u64,
+}
+
+impl SparseInstructionIndex {
+    pub fn lookup(&self, address: u64) -> Option<DecodedInstruction> {
+        let section = self.sections.iter().find(|section| {
+            let section_end = section.address.saturating_add(section.size);
+            address >= section.address
+                && address.checked_add(4).is_some_and(|end| end <= section_end)
+        })?;
+        let section_offset = address.checked_sub(section.address)?;
+        if section_offset.checked_add(4)? > section.file_size {
+            return None;
+        }
+        let file_offset = section.file_offset.checked_add(section_offset)?;
+        let start = usize::try_from(file_offset).ok()?;
+        let end = start.checked_add(4)?;
+        let bytes = self.mmap.get(start..end)?;
+        let word = u32::from_le_bytes(bytes.try_into().ok()?);
+        let (class, load_kind) = classify_aarch64_instruction_word(word);
+        Some(DecodedInstruction {
+            address,
+            mnemonic: String::new(),
+            operands: String::new(),
+            raw_line: format!("0x{address:x}: 0x{word:08x}"),
+            class,
+            load_kind,
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sections.is_empty()
+    }
+}
+
+pub fn build_sparse_instruction_index_from_elf(elf_path: &Path) -> Result<SparseInstructionIndex> {
+    let file_handle =
+        File::open(elf_path).with_context(|| format!("Failed to open '{}'", elf_path.display()))?;
+    let mmap = unsafe {
+        memmap2::MmapOptions::new()
+            .map(&file_handle)
+            .with_context(|| format!("Failed to mmap '{}'", elf_path.display()))?
+    };
+    let object = object::File::parse(&*mmap)
+        .with_context(|| format!("Failed to parse ELF '{}'", elf_path.display()))?;
+    let mut sections = Vec::new();
+    for section in object.sections() {
+        if section.kind() != SectionKind::Text {
+            continue;
+        }
+        let Some((file_offset, file_size)) = section.file_range() else {
+            continue;
+        };
+        if file_size < 4 {
+            continue;
+        }
+        sections.push(InstructionSection {
+            address: section.address(),
+            size: section.size().min(file_size),
+            file_offset,
+            file_size,
+        });
+    }
+    sections.sort_by_key(|section| section.address);
+    Ok(SparseInstructionIndex { mmap, sections })
 }
 
 pub fn build_instruction_index_from_elf(
@@ -74,6 +154,110 @@ pub fn build_instruction_index_from_elf(
         )
     })?;
     InstructionIndex::parse_objdump_text(&stdout)
+}
+
+fn classify_aarch64_instruction_word(
+    instruction: u32,
+) -> (InstructionClass, Option<LoadInstructionKind>) {
+    if is_aarch64_barrier_or_sync(instruction) {
+        return (InstructionClass::BarrierOrSync, None);
+    }
+    if is_aarch64_system_instruction(instruction) {
+        return (InstructionClass::SystemInstruction, None);
+    }
+    if is_aarch64_branch(instruction) {
+        return (InstructionClass::Branch, None);
+    }
+    if is_aarch64_prefetch(instruction) {
+        return (
+            InstructionClass::Prefetch,
+            Some(LoadInstructionKind::Prefetch),
+        );
+    }
+    if is_aarch64_load_store(instruction) {
+        let is_vector = instruction & (1 << 26) != 0;
+        let is_exclusive = (instruction & 0x3f00_0000) == 0x0800_0000;
+        let is_pair = (instruction & 0x3a00_0000) == 0x2800_0000;
+        let is_literal = (instruction & 0x1b00_0000) == 0x1800_0000;
+        let is_load = is_literal || instruction & (1 << 22) != 0;
+        if is_load {
+            let kind = if is_exclusive {
+                LoadInstructionKind::AtomicExclusive
+            } else if is_pair && is_vector {
+                LoadInstructionKind::VectorPair
+            } else if is_pair {
+                LoadInstructionKind::ScalarPair
+            } else if is_literal {
+                LoadInstructionKind::Literal
+            } else if is_vector {
+                LoadInstructionKind::VectorSingle
+            } else if is_aarch64_sign_extending_load(instruction) {
+                LoadInstructionKind::SignExtend
+            } else {
+                LoadInstructionKind::ScalarSingle
+            };
+            let class = if is_exclusive {
+                InstructionClass::Atomic
+            } else if is_vector {
+                InstructionClass::VectorLoad
+            } else {
+                InstructionClass::ScalarLoad
+            };
+            return (class, Some(kind));
+        }
+        let class = if is_exclusive {
+            InstructionClass::Atomic
+        } else if is_vector {
+            InstructionClass::VectorStore
+        } else {
+            InstructionClass::ScalarStore
+        };
+        return (class, None);
+    }
+    if is_aarch64_fp_simd(instruction) {
+        return (InstructionClass::ComputeFpSimd, None);
+    }
+    (InstructionClass::ComputeInt, None)
+}
+
+fn is_aarch64_branch(instruction: u32) -> bool {
+    matches!((instruction >> 26) & 0x3f, 0b000101 | 0b100101)
+        || (instruction & 0x7e00_0000) == 0x3400_0000
+        || (instruction & 0x7e00_0000) == 0x3600_0000
+        || (instruction & 0xfe00_0000) == 0x5400_0000
+        || (instruction & 0xfe00_0000) == 0xd600_0000
+}
+
+fn is_aarch64_barrier_or_sync(instruction: u32) -> bool {
+    matches!(
+        instruction,
+        0xd503_30bf | 0xd503_31bf | 0xd503_32bf | 0xd503_33bf | 0xd503_3f9f
+    ) || (instruction & 0xffff_f0ff) == 0xd503_305f
+        || (instruction & 0xffff_f0ff) == 0xd503_309f
+        || (instruction & 0xffff_f0ff) == 0xd503_30df
+}
+
+fn is_aarch64_system_instruction(instruction: u32) -> bool {
+    (instruction & 0xffc0_0000) == 0xd500_0000
+}
+
+fn is_aarch64_load_store(instruction: u32) -> bool {
+    ((instruction >> 25) & 0x7) == 0b100
+}
+
+fn is_aarch64_prefetch(instruction: u32) -> bool {
+    (instruction & 0xffc0_0000) == 0xf980_0000
+        || (instruction & 0xffe0_0c00) == 0xf880_0000
+        || (instruction & 0xffe0_0c00) == 0xf8a0_0000
+        || (instruction & 0xff00_0000) == 0xd800_0000
+}
+
+fn is_aarch64_sign_extending_load(instruction: u32) -> bool {
+    matches!((instruction >> 30) & 0x3, 0b10 | 0b11) && instruction & (1 << 23) != 0
+}
+
+fn is_aarch64_fp_simd(instruction: u32) -> bool {
+    matches!((instruction >> 25) & 0x7, 0b011 | 0b111)
 }
 
 fn parse_objdump_instruction_line(line: &str) -> Option<DecodedInstruction> {

@@ -548,6 +548,9 @@ pub enum SpeReportCategory {
     LoadL2,
     LoadL3,
     LoadLlc,
+    LoadPeerCore,
+    LoadPeerCluster,
+    LoadSystemCache,
     LoadDram,
     LoadRemote,
     LoadIo,
@@ -556,6 +559,9 @@ pub enum SpeReportCategory {
     StoreL2,
     StoreL3,
     StoreLlc,
+    StorePeerCore,
+    StorePeerCluster,
+    StoreSystemCache,
     StoreDram,
     StoreRemote,
     StoreIo,
@@ -563,7 +569,11 @@ pub enum SpeReportCategory {
     AtomicL1,
     AtomicL2,
     AtomicL3,
+    AtomicPeerCore,
+    AtomicPeerCluster,
+    AtomicSystemCache,
     AtomicDram,
+    AtomicRemote,
     AtomicUnknown,
     BranchHit,
     BranchMiss,
@@ -720,6 +730,15 @@ pub struct SpeHierarchyAddressAggregate {
     pub cpu_parents: BTreeMap<u32, BTreeMap<SpeReportCategory, SpeHierarchyParentAggregate>>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct SpeAggregateResult {
+    pub rows: BTreeMap<PmuAddressKey, SpeAddressAggregate>,
+    pub categories: BTreeMap<PmuAddressKey, SpeAddressCategoryAggregate>,
+    pub hierarchy: BTreeMap<PmuAddressKey, SpeHierarchyAddressAggregate>,
+    pub instruction_classes: BTreeMap<PmuAddressKey, InstructionClassAddressAggregate>,
+    pub load_instruction_kinds: BTreeMap<PmuAddressKey, LoadInstructionAddressAggregate>,
+}
+
 pub fn aggregate_spe_by_address(
     samples: &[SpeSample],
 ) -> BTreeMap<PmuAddressKey, SpeAddressAggregate> {
@@ -761,6 +780,131 @@ pub fn aggregate_spe_by_address(
     rows
 }
 
+pub fn aggregate_spe_all_by_address(
+    samples: &[SpeSample],
+    mut classify: impl FnMut(&SpeSample) -> (InstructionClass, Option<LoadInstructionKind>),
+) -> SpeAggregateResult {
+    let mut result = SpeAggregateResult::default();
+    for sample in samples {
+        let key = PmuAddressKey {
+            mapping_id: sample.mapping_id,
+            ip: sample.pc,
+        };
+
+        let row: &mut SpeAddressAggregate = result.rows.entry(key.clone()).or_default();
+        row.cpus.insert(sample.cpu);
+        row.tids.insert(sample.tid);
+        row.sample_count += 1;
+        if let Some(latency) = sample.latency_cycles {
+            row.latency_cycles_sum += u64::from(latency);
+            row.latency_sample_count += 1;
+        }
+        match sample.cache_result {
+            1 => row.cache_hits += 1,
+            2 => row.cache_misses += 1,
+            _ => {}
+        }
+        match sample.branch_result {
+            1 => row.branch_correct += 1,
+            2 => row.branch_mispredict += 1,
+            _ => {}
+        }
+        if sample.data_source != 0 {
+            *row.data_source_counts
+                .entry(sample.data_source)
+                .or_default() += 1;
+        }
+        row.operation_flags_or |= sample.operation_flags;
+        row.event_flags_or |= sample.event_flags;
+        if sample.decode_status != 0 {
+            row.decode_error_count += 1;
+        }
+
+        let category = spe_category(sample);
+        let category_row: &mut SpeAddressCategoryAggregate =
+            result.categories.entry(key.clone()).or_default();
+        category_row.sample_count += 1;
+        record_spe_category_sample(
+            category_row.categories.entry(category).or_default(),
+            sample.latency_cycles,
+        );
+        record_spe_category_sample(
+            category_row
+                .cpu_categories
+                .entry(sample.cpu)
+                .or_default()
+                .entry(category)
+                .or_default(),
+            sample.latency_cycles,
+        );
+
+        let (class, load_kind) = classify(sample);
+        let child_class = hierarchy_child_class(category, class);
+        let hierarchy_row: &mut SpeHierarchyAddressAggregate =
+            result.hierarchy.entry(key.clone()).or_default();
+        hierarchy_row.sample_count = hierarchy_row.sample_count.saturating_add(1);
+        record_hierarchy_sample(
+            hierarchy_row.parents.entry(category).or_default(),
+            child_class,
+            sample.latency_cycles,
+        );
+        record_hierarchy_sample(
+            hierarchy_row
+                .cpu_parents
+                .entry(sample.cpu)
+                .or_default()
+                .entry(category)
+                .or_default(),
+            child_class,
+            sample.latency_cycles,
+        );
+
+        let class_row: &mut InstructionClassAddressAggregate =
+            result.instruction_classes.entry(key.clone()).or_default();
+        class_row.sample_count = class_row.sample_count.saturating_add(1);
+        record_spe_category_sample(
+            class_row.classes.entry(class).or_default(),
+            sample.latency_cycles,
+        );
+        record_spe_category_sample(
+            class_row
+                .cpu_classes
+                .entry(sample.cpu)
+                .or_default()
+                .entry(class)
+                .or_default(),
+            sample.latency_cycles,
+        );
+
+        if let Some(kind) = load_kind {
+            let kind_row: &mut LoadInstructionAddressAggregate =
+                result.load_instruction_kinds.entry(key).or_default();
+            kind_row.sample_count = kind_row.sample_count.saturating_add(1);
+            record_spe_category_sample(
+                kind_row.kinds.entry(kind).or_default(),
+                sample.latency_cycles,
+            );
+            record_spe_category_sample(
+                kind_row
+                    .cpu_kinds
+                    .entry(sample.cpu)
+                    .or_default()
+                    .entry(kind)
+                    .or_default(),
+                sample.latency_cycles,
+            );
+        }
+    }
+    result
+}
+
+fn record_spe_category_sample(aggregate: &mut SpeCategoryAggregate, latency_cycles: Option<u32>) {
+    aggregate.sample_count = aggregate.sample_count.saturating_add(1);
+    if let Some(latency) = latency_cycles {
+        aggregate.record_latency(latency);
+    }
+}
+
 pub fn spe_category(sample: &SpeSample) -> SpeReportCategory {
     if sample.decode_status != 0 {
         return SpeReportCategory::DecodeUnknown;
@@ -792,11 +936,12 @@ fn load_category(data_source: u16) -> SpeReportCategory {
         u16::MAX => SpeReportCategory::LoadUnknown,
         0x00 => SpeReportCategory::LoadL1,
         0x08 => SpeReportCategory::LoadL2,
-        0x09 | 0x0a => SpeReportCategory::LoadL3,
-        0x0b => SpeReportCategory::LoadLlc,
-        0x0c => SpeReportCategory::LoadRemote,
-        0x0d | 0x0f => SpeReportCategory::LoadIo,
+        0x09 => SpeReportCategory::LoadPeerCore,
+        0x0a | 0x0c => SpeReportCategory::LoadPeerCluster,
+        0x0b => SpeReportCategory::LoadSystemCache,
+        0x0d => SpeReportCategory::LoadRemote,
         0x0e => SpeReportCategory::LoadDram,
+        0x0f => SpeReportCategory::LoadIo,
         _ => SpeReportCategory::LoadUnknown,
     }
 }
@@ -806,11 +951,12 @@ fn store_category(data_source: u16) -> SpeReportCategory {
         u16::MAX => SpeReportCategory::StoreUnknown,
         0x00 => SpeReportCategory::StoreL1,
         0x08 => SpeReportCategory::StoreL2,
-        0x09 | 0x0a => SpeReportCategory::StoreL3,
-        0x0b => SpeReportCategory::StoreLlc,
-        0x0c => SpeReportCategory::StoreRemote,
-        0x0d | 0x0f => SpeReportCategory::StoreIo,
+        0x09 => SpeReportCategory::StorePeerCore,
+        0x0a | 0x0c => SpeReportCategory::StorePeerCluster,
+        0x0b => SpeReportCategory::StoreSystemCache,
+        0x0d => SpeReportCategory::StoreRemote,
         0x0e => SpeReportCategory::StoreDram,
+        0x0f => SpeReportCategory::StoreIo,
         _ => SpeReportCategory::StoreUnknown,
     }
 }
@@ -819,7 +965,10 @@ fn atomic_category(data_source: u16) -> SpeReportCategory {
     match data_source {
         0x00 => SpeReportCategory::AtomicL1,
         0x08 => SpeReportCategory::AtomicL2,
-        0x09 | 0x0a | 0x0b => SpeReportCategory::AtomicL3,
+        0x09 => SpeReportCategory::AtomicPeerCore,
+        0x0a | 0x0c => SpeReportCategory::AtomicPeerCluster,
+        0x0b => SpeReportCategory::AtomicSystemCache,
+        0x0d => SpeReportCategory::AtomicRemote,
         0x0e => SpeReportCategory::AtomicDram,
         _ => SpeReportCategory::AtomicUnknown,
     }
@@ -834,6 +983,9 @@ pub fn hierarchy_child_class(
         | SpeReportCategory::LoadL2
         | SpeReportCategory::LoadL3
         | SpeReportCategory::LoadLlc
+        | SpeReportCategory::LoadPeerCore
+        | SpeReportCategory::LoadPeerCluster
+        | SpeReportCategory::LoadSystemCache
         | SpeReportCategory::LoadDram
         | SpeReportCategory::LoadRemote
         | SpeReportCategory::LoadIo
@@ -851,6 +1003,9 @@ pub fn hierarchy_child_class(
         | SpeReportCategory::StoreL2
         | SpeReportCategory::StoreL3
         | SpeReportCategory::StoreLlc
+        | SpeReportCategory::StorePeerCore
+        | SpeReportCategory::StorePeerCluster
+        | SpeReportCategory::StoreSystemCache
         | SpeReportCategory::StoreDram
         | SpeReportCategory::StoreRemote
         | SpeReportCategory::StoreIo
@@ -866,7 +1021,11 @@ pub fn hierarchy_child_class(
         SpeReportCategory::AtomicL1
         | SpeReportCategory::AtomicL2
         | SpeReportCategory::AtomicL3
+        | SpeReportCategory::AtomicPeerCore
+        | SpeReportCategory::AtomicPeerCluster
+        | SpeReportCategory::AtomicSystemCache
         | SpeReportCategory::AtomicDram
+        | SpeReportCategory::AtomicRemote
         | SpeReportCategory::AtomicUnknown => match class {
             InstructionClass::Atomic
             | InstructionClass::AcquireRelease
@@ -1291,8 +1450,8 @@ mod tests {
     }
 
     #[test]
-    fn spe_data_source_remote_reports_remote_categories() {
-        let load = SpeSample {
+    fn common_data_source_reports_peer_and_remote_categories() {
+        let base = SpeSample {
             flags: 0,
             event_run_ref: 0,
             pid: 1,
@@ -1307,17 +1466,60 @@ mod tests {
             cache_level: 0,
             cache_result: 0,
             branch_result: 0,
-            data_source: 0x0c,
+            data_source: 0,
             decode_status: 0,
             raw_packet_offset: 0,
         };
-        let store = SpeSample {
-            operation_flags: SPE_OP_STORE,
-            ..load.clone()
-        };
 
-        assert_eq!(spe_category(&load), SpeReportCategory::LoadRemote);
-        assert_eq!(spe_category(&store), SpeReportCategory::StoreRemote);
+        for (source, load_category, store_category, atomic_category) in [
+            (
+                0x09,
+                SpeReportCategory::LoadPeerCore,
+                SpeReportCategory::StorePeerCore,
+                SpeReportCategory::AtomicPeerCore,
+            ),
+            (
+                0x0a,
+                SpeReportCategory::LoadPeerCluster,
+                SpeReportCategory::StorePeerCluster,
+                SpeReportCategory::AtomicPeerCluster,
+            ),
+            (
+                0x0b,
+                SpeReportCategory::LoadSystemCache,
+                SpeReportCategory::StoreSystemCache,
+                SpeReportCategory::AtomicSystemCache,
+            ),
+            (
+                0x0c,
+                SpeReportCategory::LoadPeerCluster,
+                SpeReportCategory::StorePeerCluster,
+                SpeReportCategory::AtomicPeerCluster,
+            ),
+            (
+                0x0d,
+                SpeReportCategory::LoadRemote,
+                SpeReportCategory::StoreRemote,
+                SpeReportCategory::AtomicRemote,
+            ),
+        ] {
+            let load = SpeSample {
+                data_source: source,
+                ..base.clone()
+            };
+            let store = SpeSample {
+                operation_flags: SPE_OP_STORE,
+                ..load.clone()
+            };
+            let atomic = SpeSample {
+                operation_flags: SPE_OP_LOAD | SPE_OP_STORE,
+                ..load.clone()
+            };
+
+            assert_eq!(spe_category(&load), load_category);
+            assert_eq!(spe_category(&store), store_category);
+            assert_eq!(spe_category(&atomic), atomic_category);
+        }
     }
 
     #[test]

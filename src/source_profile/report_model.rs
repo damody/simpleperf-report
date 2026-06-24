@@ -11,15 +11,14 @@ use serde::Serialize;
 
 use super::bundle::SourceProfileBundle;
 use super::instruction_class::{
-    build_instruction_index_from_elf, InstructionClass, InstructionIndex, LoadInstructionKind,
+    build_sparse_instruction_index_from_elf, InstructionClass, LoadInstructionKind,
+    SparseInstructionIndex,
 };
 use super::line_resolver::{
     resolve_source_path, runtime_address_to_relative, CachedElfLineResolver,
 };
 use super::metrics::{
-    aggregate_instruction_classes_by_address, aggregate_load_instruction_kinds_by_address,
-    aggregate_pmu_file, aggregate_spe_by_address, aggregate_spe_categories_by_address,
-    aggregate_spe_hierarchy_by_address, compute_percentages, derive_pmu_metrics,
+    aggregate_pmu_file, aggregate_spe_all_by_address, compute_percentages, derive_pmu_metrics,
     hierarchy_by_cpu_from_address_aggregates, InstructionClassAddressAggregate,
     LoadInstructionAddressAggregate, MetricValue, PmuAddressAggregate, PmuAddressKey,
     SpeAddressAggregate, SpeAddressCategoryAggregate, SpeCategoryAggregate,
@@ -71,6 +70,9 @@ pub const SPE_CATEGORY_NAMES: &[&str] = &[
     "load_l2",
     "load_l3",
     "load_llc",
+    "load_peer_core",
+    "load_peer_cluster",
+    "load_system_cache",
     "load_dram",
     "load_remote",
     "load_io",
@@ -79,6 +81,9 @@ pub const SPE_CATEGORY_NAMES: &[&str] = &[
     "store_l2",
     "store_l3",
     "store_llc",
+    "store_peer_core",
+    "store_peer_cluster",
+    "store_system_cache",
     "store_dram",
     "store_remote",
     "store_io",
@@ -86,7 +91,11 @@ pub const SPE_CATEGORY_NAMES: &[&str] = &[
     "atomic_l1",
     "atomic_l2",
     "atomic_l3",
+    "atomic_peer_core",
+    "atomic_peer_cluster",
+    "atomic_system_cache",
     "atomic_dram",
+    "atomic_remote",
     "atomic_unknown",
     "branch_hit",
     "branch_miss",
@@ -550,11 +559,9 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
     if let Some(path) = &bundle.spe_samples_path {
         phase_start = Instant::now();
         let (_, samples) = read_spe_samples(path)?;
-        let aggregates = aggregate_spe_by_address(&samples);
-        let mut category_aggregates = aggregate_spe_categories_by_address(&samples);
         let mut instruction_cache = InstructionIndexCache::default();
-        let hierarchy_aggregates = aggregate_spe_hierarchy_by_address(&samples, |sample| {
-            instruction_cache.classify(
+        let mut spe_aggregates = aggregate_spe_all_by_address(&samples, |sample| {
+            instruction_cache.classify_with_load_kind(
                 bundle,
                 &elf_matches,
                 sample.mapping_id,
@@ -562,43 +569,26 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 &mut warnings,
             )
         });
-        let mut instruction_aggregates =
-            aggregate_instruction_classes_by_address(&samples, |sample| {
-                instruction_cache.classify(
-                    bundle,
-                    &elf_matches,
-                    sample.mapping_id,
-                    sample.pc,
-                    &mut warnings,
-                )
-            });
-        let mut load_kind_aggregates =
-            aggregate_load_instruction_kinds_by_address(&samples, |sample| {
-                instruction_cache.load_kind(
-                    bundle,
-                    &elf_matches,
-                    sample.mapping_id,
-                    sample.pc,
-                    &mut warnings,
-                )
-            });
         spe_cpu_category_values =
-            make_spe_cpu_category_values_from_address_aggregates(&category_aggregates);
+            make_spe_cpu_category_values_from_address_aggregates(&spe_aggregates.categories);
         spe_cpu_category_histograms =
-            make_spe_cpu_category_histograms_from_address_aggregates(&category_aggregates);
-        let hierarchy_cpu_parents = hierarchy_by_cpu_from_address_aggregates(&hierarchy_aggregates);
+            make_spe_cpu_category_histograms_from_address_aggregates(&spe_aggregates.categories);
+        let hierarchy_cpu_parents =
+            hierarchy_by_cpu_from_address_aggregates(&spe_aggregates.hierarchy);
         spe_hierarchical_cpu_values =
             make_spe_hierarchy_cpu_values_from_cpu_parents(&hierarchy_cpu_parents);
         spe_hierarchical_cpu_histograms =
             make_spe_hierarchy_cpu_histograms_from_cpu_parents(&hierarchy_cpu_parents);
-        instruction_cpu_class_values =
-            make_instruction_cpu_class_values_from_address_aggregates(&instruction_aggregates);
-        load_cpu_kind_values =
-            make_load_cpu_kind_values_from_address_aggregates(&load_kind_aggregates);
+        instruction_cpu_class_values = make_instruction_cpu_class_values_from_address_aggregates(
+            &spe_aggregates.instruction_classes,
+        );
+        load_cpu_kind_values = make_load_cpu_kind_values_from_address_aggregates(
+            &spe_aggregates.load_instruction_kinds,
+        );
         log_timing("build_model.spe_read_aggregate", phase_start.elapsed());
 
         phase_start = Instant::now();
-        for (key, aggregate) in aggregates {
+        for (key, aggregate) in spe_aggregates.rows {
             if let Some((file, line, function, module)) = resolve_key(
                 bundle,
                 &elf_matches,
@@ -618,13 +608,13 @@ pub fn build_report_model(bundle: &SourceProfileBundle) -> Result<ReportModel> {
                 }
                 row.function = prefer_nonempty(&row.function, function);
                 row.module = prefer_nonempty(&row.module, module);
-                if let Some(categories) = category_aggregates.remove(&key) {
+                if let Some(categories) = spe_aggregates.categories.remove(&key) {
                     merge_spe_categories(row, categories);
                 }
-                if let Some(instruction_classes) = instruction_aggregates.remove(&key) {
+                if let Some(instruction_classes) = spe_aggregates.instruction_classes.remove(&key) {
                     merge_instruction_classes(row, instruction_classes);
                 }
-                if let Some(load_kinds) = load_kind_aggregates.remove(&key) {
+                if let Some(load_kinds) = spe_aggregates.load_instruction_kinds.remove(&key) {
                     merge_load_instruction_kinds(row, load_kinds);
                 }
                 merge_spe(row, aggregate);
@@ -824,11 +814,24 @@ fn relative_address_for_mapping(mapping: &ProcessMapRecord, ip: u64) -> Option<u
 
 #[derive(Default)]
 struct InstructionIndexCache {
-    indexes: BTreeMap<PathBuf, Option<InstructionIndex>>,
+    indexes: BTreeMap<PathBuf, Option<SparseInstructionIndex>>,
     warned_unavailable: bool,
 }
 
 impl InstructionIndexCache {
+    fn classify_with_load_kind(
+        &mut self,
+        bundle: &SourceProfileBundle,
+        elf_matches: &BTreeMap<String, super::symbol_resolver::ElfMatch>,
+        mapping_id: u64,
+        runtime_pc: u64,
+        warnings: &mut Vec<String>,
+    ) -> (InstructionClass, Option<LoadInstructionKind>) {
+        self.lookup_instruction(bundle, elf_matches, mapping_id, runtime_pc, warnings)
+            .map(|instruction| (instruction.class, instruction.load_kind))
+            .unwrap_or((InstructionClass::MissingInstruction, None))
+    }
+
     fn classify(
         &mut self,
         bundle: &SourceProfileBundle,
@@ -878,7 +881,7 @@ impl InstructionIndexCache {
         };
 
         if !self.indexes.contains_key(path) {
-            let index = match build_instruction_index_from_elf(path, None) {
+            let index = match build_sparse_instruction_index_from_elf(path) {
                 Ok(index) if !index.is_empty() => Some(index),
                 Ok(_) => {
                     warnings.push(format!("Instruction index empty for {}", path.display()));
@@ -899,7 +902,6 @@ impl InstructionIndexCache {
             .get(path)
             .and_then(|index| index.as_ref())
             .and_then(|index| index.lookup(relative_address))
-            .cloned()
     }
 }
 
@@ -2725,12 +2727,15 @@ fn tail_est_time_value(
     }
 }
 
-fn spe_report_categories() -> [(SpeReportCategory, &'static str); 34] {
+fn spe_report_categories() -> [(SpeReportCategory, &'static str); 44] {
     [
         (SpeReportCategory::LoadL1, "load_l1"),
         (SpeReportCategory::LoadL2, "load_l2"),
         (SpeReportCategory::LoadL3, "load_l3"),
         (SpeReportCategory::LoadLlc, "load_llc"),
+        (SpeReportCategory::LoadPeerCore, "load_peer_core"),
+        (SpeReportCategory::LoadPeerCluster, "load_peer_cluster"),
+        (SpeReportCategory::LoadSystemCache, "load_system_cache"),
         (SpeReportCategory::LoadDram, "load_dram"),
         (SpeReportCategory::LoadRemote, "load_remote"),
         (SpeReportCategory::LoadIo, "load_io"),
@@ -2739,6 +2744,9 @@ fn spe_report_categories() -> [(SpeReportCategory, &'static str); 34] {
         (SpeReportCategory::StoreL2, "store_l2"),
         (SpeReportCategory::StoreL3, "store_l3"),
         (SpeReportCategory::StoreLlc, "store_llc"),
+        (SpeReportCategory::StorePeerCore, "store_peer_core"),
+        (SpeReportCategory::StorePeerCluster, "store_peer_cluster"),
+        (SpeReportCategory::StoreSystemCache, "store_system_cache"),
         (SpeReportCategory::StoreDram, "store_dram"),
         (SpeReportCategory::StoreRemote, "store_remote"),
         (SpeReportCategory::StoreIo, "store_io"),
@@ -2746,7 +2754,11 @@ fn spe_report_categories() -> [(SpeReportCategory, &'static str); 34] {
         (SpeReportCategory::AtomicL1, "atomic_l1"),
         (SpeReportCategory::AtomicL2, "atomic_l2"),
         (SpeReportCategory::AtomicL3, "atomic_l3"),
+        (SpeReportCategory::AtomicPeerCore, "atomic_peer_core"),
+        (SpeReportCategory::AtomicPeerCluster, "atomic_peer_cluster"),
+        (SpeReportCategory::AtomicSystemCache, "atomic_system_cache"),
         (SpeReportCategory::AtomicDram, "atomic_dram"),
+        (SpeReportCategory::AtomicRemote, "atomic_remote"),
         (SpeReportCategory::AtomicUnknown, "atomic_unknown"),
         (SpeReportCategory::BranchHit, "branch_hit"),
         (SpeReportCategory::BranchMiss, "branch_miss"),

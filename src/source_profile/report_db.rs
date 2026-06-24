@@ -66,9 +66,9 @@ pub fn write_report_db_from_model(
         )?;
         for row in &model.rows {
             let pmu_json = metric_map_json(&row.pmu_values)?;
-            let spe_json = metric_map_json(&row.spe_values)?;
-            let instruction_json = metric_map_json(&row.instruction_values)?;
-            let load_instruction_json = metric_map_json(&row.load_instruction_values)?;
+            let spe_json = sparse_metric_map_json(&row.spe_values)?;
+            let instruction_json = sparse_metric_map_json(&row.instruction_values)?;
+            let load_instruction_json = sparse_metric_map_json(&row.load_instruction_values)?;
             stmt.execute(params![
                 row.file,
                 row.line,
@@ -233,6 +233,19 @@ fn metric_map_json(
 ) -> Result<String> {
     let entries = values
         .iter()
+        .map(|(key, value)| (key.clone(), metric_value_text(Some(value))))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    Ok(serde_json::to_string(&entries)?)
+}
+
+fn sparse_metric_map_json(
+    values: &std::collections::BTreeMap<String, super::metrics::MetricValue>,
+) -> Result<String> {
+    let entries = values
+        .iter()
+        .filter(|(_, value)| {
+            !matches!(value, super::metrics::MetricValue::Number(number) if *number == 0.0)
+        })
         .map(|(key, value)| (key.clone(), metric_value_text(Some(value))))
         .collect::<std::collections::BTreeMap<_, _>>();
     Ok(serde_json::to_string(&entries)?)

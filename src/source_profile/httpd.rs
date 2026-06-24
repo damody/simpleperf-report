@@ -15,7 +15,10 @@ use rusqlite::{params_from_iter, types::Value, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
-use super::report_model::{SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES, SPE_COLUMNS};
+use super::report_model::{
+    INSTRUCTION_CLASS_METRICS, INSTRUCTION_CLASS_NAMES, LOAD_INSTRUCTION_KIND_NAMES,
+    LOAD_INSTRUCTION_METRICS, SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES, SPE_COLUMNS,
+};
 
 pub const DEFAULT_PAGE_SIZE: u32 = 1000;
 pub const MAX_PAGE_SIZE: u32 = 10000;
@@ -84,6 +87,8 @@ pub struct SourceLineDto {
     pub file_acc_p_pct: f64,
     pub pmu_values: BTreeMap<String, String>,
     pub spe_values: BTreeMap<String, String>,
+    pub instruction_values: BTreeMap<String, String>,
+    pub load_instruction_values: BTreeMap<String, String>,
     pub cpi: String,
     pub l1d_cache_hit_rate: String,
     pub mips: String,
@@ -171,7 +176,7 @@ pub fn query_source_lines(db_path: &Path, query: &SourceQuery) -> Result<SourceR
     let mut stmt = conn.prepare(&format!(
         "SELECT file, line, function, module, cpu, thread, status, code, detail,
                 sample_count, self_weight, accumulated_weight, p_pct, acc_p_pct, file_p_pct, file_acc_p_pct,
-                cpi, l1d_cache_hit_rate, mips, mcps, pmu_json, spe_json
+                cpi, l1d_cache_hit_rate, mips, mcps, pmu_json, spe_json, instruction_json, load_instruction_json
          FROM source_lines{where_sql} {order_by} LIMIT ? OFFSET ?"
     ))?;
     let rows = stmt
@@ -198,8 +203,12 @@ pub fn query_source_lines(db_path: &Path, query: &SourceQuery) -> Result<SourceR
             let mcps = row.get(19)?;
             let pmu_json: String = row.get(20)?;
             let spe_json: String = row.get(21)?;
+            let instruction_json: String = row.get(22)?;
+            let load_instruction_json: String = row.get(23)?;
             let pmu_values = parse_metric_json(&pmu_json);
             let spe_values = parse_metric_json(&spe_json);
+            let instruction_values = parse_metric_json(&instruction_json);
+            let load_instruction_values = parse_metric_json(&load_instruction_json);
             let annotation = source_annotation(SourceAnnotationInput {
                 p_pct,
                 acc_p_pct,
@@ -233,6 +242,8 @@ pub fn query_source_lines(db_path: &Path, query: &SourceQuery) -> Result<SourceR
                 file_acc_p_pct,
                 pmu_values,
                 spe_values,
+                instruction_values,
+                load_instruction_values,
                 cpi,
                 l1d_cache_hit_rate,
                 mips,
@@ -462,11 +473,31 @@ fn source_order_by(
         "mips" => "CAST(mips AS REAL)",
         "mcps" => "CAST(mcps AS REAL)",
         key if is_spe_metric_sort_key(key) => {
-            return metric_order_by("spe_json", key, desc, sampled_first, function_first);
+            return metric_order_by("spe_json", key, desc, sampled_first, function_first, true);
+        }
+        key if is_instruction_metric_sort_key(key) => {
+            return metric_order_by(
+                "instruction_json",
+                key,
+                desc,
+                sampled_first,
+                function_first,
+                true,
+            );
+        }
+        key if is_load_instruction_metric_sort_key(key) => {
+            return metric_order_by(
+                "load_instruction_json",
+                key,
+                desc,
+                sampled_first,
+                function_first,
+                true,
+            );
         }
         "code" => "code",
         key if is_metric_sort_key(key) => {
-            return metric_order_by("pmu_json", key, desc, sampled_first, function_first);
+            return metric_order_by("pmu_json", key, desc, sampled_first, function_first, false);
         }
         _ => "file",
     };
@@ -499,12 +530,33 @@ fn is_spe_metric_sort_key(key: &str) -> bool {
     SPE_CATEGORY_NAMES.contains(&category) && SPE_CATEGORY_METRICS.contains(&metric)
 }
 
+fn is_instruction_metric_sort_key(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix("instruction_class.") else {
+        return false;
+    };
+    let Some((class, metric)) = rest.split_once('.') else {
+        return false;
+    };
+    INSTRUCTION_CLASS_NAMES.contains(&class) && INSTRUCTION_CLASS_METRICS.contains(&metric)
+}
+
+fn is_load_instruction_metric_sort_key(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix("load_instruction.") else {
+        return false;
+    };
+    let Some((kind, metric)) = rest.split_once('.') else {
+        return false;
+    };
+    LOAD_INSTRUCTION_KIND_NAMES.contains(&kind) && LOAD_INSTRUCTION_METRICS.contains(&metric)
+}
+
 fn metric_order_by(
     json_column: &str,
     key: &str,
     desc: bool,
     sampled_first: bool,
     function_first: bool,
+    zero_default: bool,
 ) -> String {
     let direction = if desc { "DESC" } else { "ASC" };
     let sampled_prefix = if sampled_first {
@@ -518,8 +570,13 @@ fn metric_order_by(
         ""
     };
     let json_path = format!("$.\"{key}\"");
+    let expression = if zero_default {
+        format!("COALESCE(CAST(json_extract({json_column}, '{json_path}') AS REAL), 0)")
+    } else {
+        format!("CAST(json_extract({json_column}, '{json_path}') AS REAL)")
+    };
     format!(
-        "ORDER BY {sampled_prefix}{function_prefix}CAST(json_extract({json_column}, '{json_path}') AS REAL) {direction}, file ASC, line ASC"
+        "ORDER BY {sampled_prefix}{function_prefix}{expression} {direction}, file ASC, line ASC"
     )
 }
 
@@ -686,11 +743,11 @@ mod tests {
             ),
             (
                 "spe_sample_count",
-                "json_extract(spe_json, '$.\"spe_sample_count\"') AS REAL) ASC",
+                "COALESCE(CAST(json_extract(spe_json, '$.\"spe_sample_count\"') AS REAL), 0) ASC",
             ),
             (
                 "load_dram.est_time_pct",
-                "json_extract(spe_json, '$.\"load_dram.est_time_pct\"') AS REAL) ASC",
+                "COALESCE(CAST(json_extract(spe_json, '$.\"load_dram.est_time_pct\"') AS REAL), 0) ASC",
             ),
             ("mips", "CAST(mips AS REAL) ASC"),
             ("mcps", "CAST(mcps AS REAL) ASC"),

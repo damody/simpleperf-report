@@ -2412,7 +2412,7 @@ fn finalize_rows(
                 pmu_values.insert(key, value);
             }
 
-            let spe_values = make_spe_values(
+            let mut spe_values = make_spe_values(
                 bundle,
                 row.spe.as_ref(),
                 &row.spe_categories,
@@ -2421,20 +2421,23 @@ fn finalize_rows(
                 (total_pmu_cpu_cycles > 0.0).then_some(total_pmu_cpu_cycles),
                 spe_effective_period,
             );
-            let instruction_values = make_instruction_class_summary_values(
+            prune_zero_metric_values(&mut spe_values);
+            let mut instruction_values = make_instruction_class_summary_values(
                 &row.instruction_classes,
                 total_instruction_samples,
                 total_instruction_latency_cycles,
                 (total_pmu_cpu_cycles > 0.0).then_some(total_pmu_cpu_cycles),
                 spe_effective_period,
             );
-            let load_instruction_values = make_load_instruction_kind_summary_values(
+            prune_zero_metric_values(&mut instruction_values);
+            let mut load_instruction_values = make_load_instruction_kind_summary_values(
                 &row.load_instruction_kinds,
                 total_load_instruction_samples,
                 total_load_instruction_latency_cycles,
                 (total_pmu_cpu_cycles > 0.0).then_some(total_pmu_cpu_cycles),
                 spe_effective_period,
             );
+            prune_zero_metric_values(&mut load_instruction_values);
             let self_weight = pmu_self_weight(&row) as f64;
             let accumulated_weight =
                 row.pmu_acc
@@ -2479,6 +2482,10 @@ fn finalize_rows(
             }
         })
         .collect()
+}
+
+fn prune_zero_metric_values(values: &mut BTreeMap<String, MetricValue>) {
+    values.retain(|_, value| !matches!(value, MetricValue::Number(number) if *number == 0.0));
 }
 
 fn pmu_self_weight(row: &MutableLineRow) -> u64 {
@@ -2927,7 +2934,7 @@ pub fn metric_value_text(value: Option<&MetricValue>) -> String {
         Some(MetricValue::Missing(_)) => "Missing".to_string(),
         Some(MetricValue::Unresolved(_)) => "Unresolved".to_string(),
         Some(MetricValue::Undefined(_)) => "Undefined".to_string(),
-        None => "Missing".to_string(),
+        None => "0".to_string(),
     }
 }
 

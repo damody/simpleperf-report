@@ -377,7 +377,7 @@ pub fn write_html_summary_from_model(
       panel.innerHTML = `<div class="spe-histogram-title">${{title}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})</div>${{rows}}`;
     }}
     function metricValue(row, key) {{
-      return row.pmu_values?.[key] ?? row.spe_values?.[key] ?? row.instruction_values?.[key] ?? "Missing";
+      return row.pmu_values?.[key] ?? row.spe_values?.[key] ?? row.instruction_values?.[key] ?? row.load_instruction_values?.[key] ?? "0";
     }}
     function visibleSourceColumnList() {{
       return SOURCE_COLUMNS.filter(column => visibleSourceColumns.has(column.key));
@@ -944,7 +944,8 @@ fn summarize_spe_category_metric(
                 saw_number = true;
                 sum += value;
             }
-            Some(MetricValue::Missing(_)) | None => saw_missing = true,
+            Some(MetricValue::Missing(_)) => saw_missing = true,
+            None => {}
             Some(MetricValue::Unresolved(_)) => saw_unresolved = true,
             Some(MetricValue::Undefined(_)) => saw_undefined = true,
         }
@@ -964,7 +965,7 @@ fn summarize_spe_category_metric(
     if saw_undefined {
         return "N/A".to_string();
     }
-    "Missing".to_string()
+    "0".to_string()
 }
 
 fn summarize_instruction_class_metric(
@@ -983,7 +984,8 @@ fn summarize_instruction_class_metric(
                 saw_number = true;
                 sum += value;
             }
-            Some(MetricValue::Missing(_)) | None => saw_missing = true,
+            Some(MetricValue::Missing(_)) => saw_missing = true,
+            None => {}
             Some(MetricValue::Unresolved(_)) => saw_unresolved = true,
             Some(MetricValue::Undefined(_)) => saw_undefined = true,
         }
@@ -1003,7 +1005,7 @@ fn summarize_instruction_class_metric(
     if saw_undefined {
         return "N/A".to_string();
     }
-    "Missing".to_string()
+    "0".to_string()
 }
 
 fn summarize_load_instruction_metric(
@@ -1022,7 +1024,8 @@ fn summarize_load_instruction_metric(
                 saw_number = true;
                 sum += value;
             }
-            Some(MetricValue::Missing(_)) | None => saw_missing = true,
+            Some(MetricValue::Missing(_)) => saw_missing = true,
+            None => {}
             Some(MetricValue::Unresolved(_)) => saw_unresolved = true,
             Some(MetricValue::Undefined(_)) => saw_undefined = true,
         }
@@ -1042,7 +1045,7 @@ fn summarize_load_instruction_metric(
     if saw_undefined {
         return "N/A".to_string();
     }
-    "Missing".to_string()
+    "0".to_string()
 }
 
 fn summarize_spe_category_metric_from_values(
@@ -1054,7 +1057,8 @@ fn summarize_spe_category_metric_from_values(
         Some(MetricValue::Number(value)) => format_metric_for_summary(key, *value),
         Some(MetricValue::Undefined(_)) if show_na_for_undefined => "N/A".to_string(),
         Some(MetricValue::Unresolved(_)) => "Unresolved".to_string(),
-        Some(MetricValue::Missing(_)) | None => "Missing".to_string(),
+        Some(MetricValue::Missing(_)) => "Missing".to_string(),
+        None => "0".to_string(),
         Some(MetricValue::Undefined(_)) => "N/A".to_string(),
     }
 }

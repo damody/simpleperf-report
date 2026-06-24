@@ -369,14 +369,15 @@ fn write_instruction_class_sheet(
         "std_latency_cycles",
         "p95_latency_cycles",
         "p99_latency_cycles",
-        ">avg*3%",
+        ">p95 est_time%",
+        ">avg est_time%",
     ];
     format_basic_sheet(
         worksheet,
         1,
         (headers.len() - 1) as u16,
         &[
-            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0,
+            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0, 12.0,
         ],
     )?;
     for (col, header) in headers.iter().enumerate() {
@@ -392,7 +393,8 @@ fn write_instruction_class_sheet(
         "std_latency_cycles",
         "p95_latency_cycles",
         "p99_latency_cycles",
-        "over_avg_x3_pct",
+        "over_p95_est_time_pct",
+        "over_avg_est_time_pct",
     ];
     let mut row = 1_u32;
     for (cpu, values_by_key) in &model.instruction_cpu_class_values {
@@ -438,14 +440,15 @@ fn write_load_instruction_sheet(
         "std_latency_cycles",
         "p95_latency_cycles",
         "p99_latency_cycles",
-        ">avg*3%",
+        ">p95 est_time%",
+        ">avg est_time%",
     ];
     format_basic_sheet(
         worksheet,
         1,
         (headers.len() - 1) as u16,
         &[
-            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0,
+            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0, 12.0,
         ],
     )?;
     for (col, header) in headers.iter().enumerate() {
@@ -461,7 +464,8 @@ fn write_load_instruction_sheet(
         "std_latency_cycles",
         "p95_latency_cycles",
         "p99_latency_cycles",
-        "over_avg_x3_pct",
+        "over_p95_est_time_pct",
+        "over_avg_est_time_pct",
     ];
     let mut row = 1_u32;
     for (cpu, values_by_key) in &model.load_cpu_kind_values {

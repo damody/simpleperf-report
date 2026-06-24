@@ -663,19 +663,26 @@ impl SpeCategoryAggregate {
         Some(f64::from(samples[index]))
     }
 
-    pub fn over_avg_x3_pct(&self) -> Option<f64> {
-        let avg = self.avg_latency_cycles()?;
-        let sample_count = self.latency_cycles_samples.len();
-        if sample_count == 0 {
-            return None;
-        }
-        let threshold = avg * 3.0;
-        let over_count = self
-            .latency_cycles_samples
-            .iter()
-            .filter(|latency| f64::from(**latency) > threshold)
-            .count();
-        Some(over_count as f64 / sample_count as f64 * 100.0)
+    pub fn latency_cycles_sum_above_percentile(&self, percentile: f64) -> Option<u64> {
+        let threshold = self.percentile_latency_cycles(percentile)?;
+        Some(
+            self.latency_cycles_samples
+                .iter()
+                .filter(|latency| f64::from(**latency) > threshold)
+                .map(|latency| u64::from(*latency))
+                .sum(),
+        )
+    }
+
+    pub fn latency_cycles_sum_above_average(&self) -> Option<u64> {
+        let threshold = self.avg_latency_cycles()?;
+        Some(
+            self.latency_cycles_samples
+                .iter()
+                .filter(|latency| f64::from(**latency) > threshold)
+                .map(|latency| u64::from(*latency))
+                .sum(),
+        )
     }
 }
 

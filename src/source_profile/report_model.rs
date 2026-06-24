@@ -111,7 +111,8 @@ pub const SPE_CATEGORY_METRICS: &[&str] = &[
     "std_latency_cycles",
     "p95_latency_cycles",
     "p99_latency_cycles",
-    "over_avg_x3_pct",
+    "over_p95_est_time_pct",
+    "over_avg_est_time_pct",
 ];
 
 pub const INSTRUCTION_CLASS_NAMES: &[&str] = &[
@@ -1665,7 +1666,12 @@ fn make_spe_category_summary_values(
                 MetricValue::Number(est_time_pct)
             },
         );
-        values.extend(spe_category_latency_metric_values(name, aggregate));
+        values.extend(spe_category_latency_metric_values(
+            name,
+            aggregate,
+            Some(total_spe_latency_cycles as f64),
+            1.0,
+        ));
     }
     values
 }
@@ -1673,6 +1679,8 @@ fn make_spe_category_summary_values(
 fn spe_category_latency_metric_values(
     name: &str,
     aggregate: Option<&SpeCategoryAggregate>,
+    est_time_denominator_cycles: Option<f64>,
+    spe_effective_period: f64,
 ) -> BTreeMap<String, MetricValue> {
     let mut values = BTreeMap::new();
     let has_samples = aggregate
@@ -1714,8 +1722,24 @@ fn spe_category_latency_metric_values(
         missing_or_zero(aggregate.and_then(|value| value.percentile_latency_cycles(99.0))),
     );
     values.insert(
-        format!("{name}.over_avg_x3_pct"),
-        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::over_avg_x3_pct)),
+        format!("{name}.over_p95_est_time_pct"),
+        tail_p95_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ),
+    );
+    values.insert(
+        format!("{name}.over_avg_est_time_pct"),
+        tail_avg_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ),
     );
     values
 }
@@ -1762,7 +1786,12 @@ fn make_instruction_class_summary_values(
                 spe_effective_period,
             ),
         );
-        values.extend(instruction_class_latency_metric_values(name, aggregate));
+        values.extend(instruction_class_latency_metric_values(
+            name,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ));
     }
     values
 }
@@ -1805,7 +1834,12 @@ fn make_instruction_class_distribution_values(
                 MetricValue::Number(est_time_pct)
             },
         );
-        values.extend(instruction_class_latency_metric_values(name, aggregate));
+        values.extend(instruction_class_latency_metric_values(
+            name,
+            aggregate,
+            Some(total_spe_latency_cycles as f64),
+            1.0,
+        ));
     }
     values
 }
@@ -1852,7 +1886,12 @@ fn make_load_instruction_kind_summary_values(
                 spe_effective_period,
             ),
         );
-        values.extend(load_instruction_latency_metric_values(name, aggregate));
+        values.extend(load_instruction_latency_metric_values(
+            name,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ));
     }
     values
 }
@@ -1895,7 +1934,12 @@ fn make_load_instruction_kind_distribution_values(
                 MetricValue::Number(est_time_pct)
             },
         );
-        values.extend(load_instruction_latency_metric_values(name, aggregate));
+        values.extend(load_instruction_latency_metric_values(
+            name,
+            aggregate,
+            Some(total_spe_latency_cycles as f64),
+            1.0,
+        ));
     }
     values
 }
@@ -1903,6 +1947,8 @@ fn make_load_instruction_kind_distribution_values(
 fn instruction_class_latency_metric_values(
     name: &str,
     aggregate: Option<&SpeCategoryAggregate>,
+    est_time_denominator_cycles: Option<f64>,
+    spe_effective_period: f64,
 ) -> BTreeMap<String, MetricValue> {
     let mut values = BTreeMap::new();
     let has_samples = aggregate
@@ -1944,8 +1990,24 @@ fn instruction_class_latency_metric_values(
         missing_or_zero(aggregate.and_then(|value| value.percentile_latency_cycles(99.0))),
     );
     values.insert(
-        format!("instruction_class.{name}.over_avg_x3_pct"),
-        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::over_avg_x3_pct)),
+        format!("instruction_class.{name}.over_p95_est_time_pct"),
+        tail_p95_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ),
+    );
+    values.insert(
+        format!("instruction_class.{name}.over_avg_est_time_pct"),
+        tail_avg_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ),
     );
     values
 }
@@ -1953,6 +2015,8 @@ fn instruction_class_latency_metric_values(
 fn load_instruction_latency_metric_values(
     name: &str,
     aggregate: Option<&SpeCategoryAggregate>,
+    est_time_denominator_cycles: Option<f64>,
+    spe_effective_period: f64,
 ) -> BTreeMap<String, MetricValue> {
     let mut values = BTreeMap::new();
     let has_samples = aggregate
@@ -1994,8 +2058,24 @@ fn load_instruction_latency_metric_values(
         missing_or_zero(aggregate.and_then(|value| value.percentile_latency_cycles(99.0))),
     );
     values.insert(
-        format!("load_instruction.{name}.over_avg_x3_pct"),
-        missing_or_zero(aggregate.and_then(SpeCategoryAggregate::over_avg_x3_pct)),
+        format!("load_instruction.{name}.over_p95_est_time_pct"),
+        tail_p95_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ),
+    );
+    values.insert(
+        format!("load_instruction.{name}.over_avg_est_time_pct"),
+        tail_avg_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ),
     );
     values
 }
@@ -2415,7 +2495,12 @@ fn make_spe_category_values(
                 spe_effective_period,
             ),
         );
-        values.extend(spe_category_latency_metric_values(name, aggregate));
+        values.extend(spe_category_latency_metric_values(
+            name,
+            aggregate,
+            est_time_denominator_cycles,
+            spe_effective_period,
+        ));
     }
     values
 }
@@ -2438,6 +2523,67 @@ fn category_est_time_value(
         }
         MetricValue::Number(percent(
             latency_cycles as f64 * spe_effective_period,
+            denominator,
+        ))
+    } else {
+        MetricValue::Number(0.0)
+    }
+}
+
+fn tail_p95_est_time_value(
+    has_samples: bool,
+    has_latency: bool,
+    aggregate: Option<&SpeCategoryAggregate>,
+    est_time_denominator_cycles: Option<f64>,
+    spe_effective_period: f64,
+) -> MetricValue {
+    tail_est_time_value(
+        has_samples,
+        has_latency,
+        aggregate
+            .and_then(|value| value.latency_cycles_sum_above_percentile(95.0))
+            .unwrap_or(0),
+        est_time_denominator_cycles,
+        spe_effective_period,
+    )
+}
+
+fn tail_avg_est_time_value(
+    has_samples: bool,
+    has_latency: bool,
+    aggregate: Option<&SpeCategoryAggregate>,
+    est_time_denominator_cycles: Option<f64>,
+    spe_effective_period: f64,
+) -> MetricValue {
+    tail_est_time_value(
+        has_samples,
+        has_latency,
+        aggregate
+            .and_then(SpeCategoryAggregate::latency_cycles_sum_above_average)
+            .unwrap_or(0),
+        est_time_denominator_cycles,
+        spe_effective_period,
+    )
+}
+
+fn tail_est_time_value(
+    has_samples: bool,
+    has_latency: bool,
+    tail_latency_cycles: u64,
+    est_time_denominator_cycles: Option<f64>,
+    spe_effective_period: f64,
+) -> MetricValue {
+    if has_samples && !has_latency {
+        MetricValue::Missing("SPE latency field unavailable".to_string())
+    } else if has_samples {
+        let Some(denominator) = est_time_denominator_cycles else {
+            return MetricValue::Missing("PMU cpu_cycles baseline missing".to_string());
+        };
+        if denominator <= 0.0 || !denominator.is_finite() {
+            return MetricValue::Undefined("PMU cpu_cycles baseline is zero".to_string());
+        }
+        MetricValue::Number(percent(
+            tail_latency_cycles as f64 * spe_effective_period,
             denominator,
         ))
     } else {
@@ -3064,31 +3210,38 @@ mod tests {
     }
 
     #[test]
-    fn spe_category_latency_metrics_include_percentiles_and_tail_ratio() {
+    fn spe_category_latency_metrics_include_percentiles_and_tail_est_time() {
         let mut load_l1 = SpeCategoryAggregate::default();
-        load_l1.sample_count = 5;
-        for latency in [10, 20, 30, 40, 200] {
+        load_l1.sample_count = 20;
+        for latency in std::iter::repeat(10)
+            .take(18)
+            .chain([100, 1000].into_iter())
+        {
             load_l1.record_latency(latency);
         }
         let values = make_spe_category_values(
             &BTreeMap::from([(SpeReportCategory::LoadL1, load_l1)]),
-            5,
-            300,
-            Some(10_000.0),
+            20,
+            1280,
+            Some(1_000_000.0),
             100.0,
         );
 
         assert!(matches!(
             values.get("load_l1.p95_latency_cycles"),
-            Some(MetricValue::Number(value)) if (*value - 200.0).abs() < f64::EPSILON
+            Some(MetricValue::Number(value)) if (*value - 100.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
             values.get("load_l1.p99_latency_cycles"),
-            Some(MetricValue::Number(value)) if (*value - 200.0).abs() < f64::EPSILON
+            Some(MetricValue::Number(value)) if (*value - 1000.0).abs() < f64::EPSILON
         ));
         assert!(matches!(
-            values.get("load_l1.over_avg_x3_pct"),
-            Some(MetricValue::Number(value)) if (*value - 20.0).abs() < f64::EPSILON
+            values.get("load_l1.over_p95_est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 10.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_l1.over_avg_est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 11.0).abs() < f64::EPSILON
         ));
     }
 
@@ -3113,6 +3266,32 @@ mod tests {
         assert_eq!(histogram.max_latency_cycles, 200);
         assert_eq!(histogram.bins.iter().map(|bin| bin.count).sum::<u64>(), 5);
         assert!(histogram.bins.iter().any(|bin| bin.count > 1));
+    }
+
+    #[test]
+    fn spe_cpu_summary_tail_est_time_uses_total_cpu_latency() {
+        let mut load_l1 = SpeCategoryAggregate::default();
+        load_l1.sample_count = 20;
+        for latency in std::iter::repeat(10)
+            .take(18)
+            .chain([100, 1000].into_iter())
+        {
+            load_l1.record_latency(latency);
+        }
+        let values = make_spe_category_summary_values(
+            &BTreeMap::from([(SpeReportCategory::LoadL1, load_l1)]),
+            20,
+            1280,
+        );
+
+        assert!(matches!(
+            values.get("load_l1.over_p95_est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 78.125).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_l1.over_avg_est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 85.9375).abs() < f64::EPSILON
+        ));
     }
 
     #[test]

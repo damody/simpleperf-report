@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, ReportModel, SPE_COLUMNS,
+    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, spe_column_keys, ReportModel,
+    SPE_CATEGORY_METRICS,
 };
 use super::summary::SourceReportSummary;
 
@@ -36,6 +37,8 @@ pub fn write_html_summary_from_model(
     let derived_pmu_columns = pmu_derived_column_keys(bundle);
     let derived_pmu_columns_json =
         serde_json::to_string(&derived_pmu_columns).unwrap_or_else(|_| "[]".to_string());
+    let spe_columns = spe_column_keys();
+    let spe_columns_json = serde_json::to_string(&spe_columns).unwrap_or_else(|_| "[]".to_string());
     let mut default_source_columns = vec![
         "file".to_string(),
         "line".to_string(),
@@ -240,7 +243,7 @@ pub fn write_html_summary_from_model(
     let activeSourceRows = [];
     const RAW_PMU_COLUMNS = {raw_pmu_columns_json};
     const DERIVED_PMU_COLUMNS = {derived_pmu_columns_json};
-    const SPE_COLUMNS = ["spe_sample_count", "spe_latency_cycles_avg", "spe_cache_hit_rate", "spe_branch_miss_rate", "spe_decode_errors"];
+    const SPE_COLUMNS = {spe_columns_json};
     const SOURCE_COLUMNS = [
       {{ key: "file", label: "File", cls: "col-file truncate", value: row => row.file }},
       {{ key: "line", label: "Line", cls: "col-line", value: row => row.line }},
@@ -558,8 +561,10 @@ pub fn write_html_summary_from_model(
         callchain_depth = manifest.capture_options.callchain_depth,
         raw_pmu_columns_json = raw_pmu_columns_json,
         derived_pmu_columns_json = derived_pmu_columns_json,
+        spe_columns_json = spe_columns_json,
         default_source_columns_json = default_source_columns_json,
-        column_help_rows = column_help_rows(bundle, &raw_pmu_columns, &derived_pmu_columns),
+        column_help_rows =
+            column_help_rows(bundle, &raw_pmu_columns, &derived_pmu_columns, &spe_columns),
         quality_rows = quality_rows(bundle),
         artifact_rows = manifest
             .artifacts
@@ -584,6 +589,7 @@ fn column_help_rows(
     bundle: &SourceProfileBundle,
     raw_pmu_columns: &[String],
     derived_pmu_columns: &[String],
+    spe_columns: &[String],
 ) -> String {
     let mut rows = vec![
         help_row("File", "source path", "歸因後的 source file。"),
@@ -696,8 +702,8 @@ fn column_help_rows(
         });
     }
 
-    for key in SPE_COLUMNS {
-        rows.push(match *key {
+    for key in spe_columns {
+        rows.push(match key.as_str() {
             "spe_sample_count" => help_row(
                 "`spe_sample_count`",
                 "decoded SPE sample count",
@@ -723,6 +729,11 @@ fn column_help_rows(
                 "SPE decode error count",
                 "SPE packet decode 失敗數。",
             ),
+            _ if is_spe_category_metric(key) => help_row(
+                &format!("`{key}`"),
+                spe_category_metric_formula(key),
+                spe_category_metric_meaning(key),
+            ),
             _ => help_row(
                 &format!("`{key}`"),
                 "SPE metric",
@@ -737,6 +748,36 @@ fn column_help_rows(
         "該 source line 的原始碼內容。",
     ));
     rows.join("\n")
+}
+
+fn is_spe_category_metric(key: &str) -> bool {
+    key.rsplit_once('.')
+        .map(|(_, metric)| SPE_CATEGORY_METRICS.contains(&metric))
+        .unwrap_or(false)
+}
+
+fn spe_category_metric_formula(key: &str) -> &'static str {
+    match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_pct") => "category SPE samples / total SPE samples",
+        Some("pmu_cycles_pct") => "source-line PMU cycles / total PMU cycles",
+        Some("spe_latency_pct") => "category SPE latency cycles / total SPE latency cycles",
+        Some("est_time_pct") => "estimated time percentage",
+        _ => "SPE category metric",
+    }
+}
+
+fn spe_category_metric_meaning(key: &str) -> &'static str {
+    match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_pct") => "此類 SPE sample 在整份 session 中的比例；不是時間。",
+        Some("pmu_cycles_pct") => {
+            "同一 source line 的 PMU cycles 佔比；memory 類別中作為 CPU hotspot context。"
+        }
+        Some("spe_latency_pct") => "此類 SPE latency cycles 佔比；cpu_instruction 為 N/A。",
+        Some("est_time_pct") => {
+            "估算時間佔比；CPU instruction 來自 PMU cycles，load/store 來自 SPE latency。"
+        }
+        _ => "Arm SPE category decoded metric。",
+    }
 }
 
 fn help_row(column: &str, formula: &str, meaning: &str) -> String {
@@ -952,6 +993,8 @@ mod tests {
         assert!(html.contains("<code>cpi</code>"));
         assert!(html.contains("<code>mips</code>"));
         assert!(html.contains("<code>spe_sample_count</code>"));
+        assert!(html.contains("<code>load_dram.est_time_pct</code>"));
+        assert!(html.contains("<code>store_unknown.est_time_pct</code>"));
         assert!(html.contains("source text"));
         assert!(html.contains("Quality"));
         assert!(html.contains("<details class=\"report-section\">\n    <summary>Quality</summary>"));
@@ -1000,6 +1043,8 @@ mod tests {
         assert!(html.contains("inst_retired"));
         assert!(!html.contains("stall_backend"));
         assert!(html.contains("spe_sample_count"));
+        assert!(html.contains("load_dram.est_time_pct"));
+        assert!(html.contains("store_unknown.est_time_pct"));
         assert!(html.contains("class=\"sort-indicator\""));
         assert!(html.contains("updateSourceSortIndicators"));
         assert!(!html.contains("id=\"sourceDetail\""));

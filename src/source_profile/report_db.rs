@@ -299,4 +299,29 @@ mod tests {
             .unwrap();
         assert_eq!(line_count as usize, model.rows.len());
     }
+
+    #[test]
+    fn sqlite_rows_include_spe_category_json() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let model = crate::source_profile::report_model::build_report_model(&bundle).unwrap();
+        let output =
+            root.join("target/source_profile_tests/report_db_spe_categories/SourceLine.sqlite");
+        if output.exists() {
+            fs::remove_file(&output).unwrap();
+        }
+
+        write_report_db_from_model(&bundle, &model, &output).unwrap();
+
+        let conn = Connection::open(&output).unwrap();
+        let matching_rows: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM source_lines WHERE spe_json LIKE '%load_dram.est_time_pct%' AND spe_json LIKE '%store_unknown.est_time_pct%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(matching_rows > 0);
+    }
 }

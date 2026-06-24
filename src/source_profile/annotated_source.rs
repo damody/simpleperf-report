@@ -12,7 +12,8 @@ use serde::Serialize;
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, metric_value_text, pmu_column_keys, ReportLineRow, ReportModel, SPE_COLUMNS,
+    build_report_model, metric_value_text, pmu_column_keys, spe_column_keys, ReportLineRow,
+    ReportModel,
 };
 use super::source_loader::load_source_file;
 
@@ -410,11 +411,11 @@ fn format_annotation(row: &ReportLineRow, pmu_columns: &[String], spe_available:
         ));
     }
     if spe_available {
-        for key in SPE_COLUMNS {
+        for key in spe_column_keys() {
             parts.push(format!(
                 "{}={}",
                 key,
-                metric_value_text(row.spe_values.get(*key))
+                metric_value_text(row.spe_values.get(&key))
             ));
         }
     }

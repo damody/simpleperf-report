@@ -7,8 +7,8 @@ use rust_xlsxwriter::{Color, Format, FormatAlign, Workbook, Worksheet};
 
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
-    build_report_model, metric_value_number, metric_value_text, pmu_column_keys, ReportModel,
-    SPE_COLUMNS,
+    build_report_model, metric_value_number, metric_value_text, pmu_column_keys, spe_column_keys,
+    ReportModel,
 };
 use super::source_loader::{load_source_file, SourceLine};
 use super::summary::SourceReportSummary;
@@ -278,7 +278,8 @@ fn write_line_sheet(
         "Accumulated Weight",
     ];
     headers.extend(pmu_columns.iter().map(String::as_str));
-    headers.extend_from_slice(SPE_COLUMNS);
+    let spe_columns = spe_column_keys();
+    headers.extend(spe_columns.iter().map(String::as_str));
     let widths = vec![
         48.0, 8.0, 28.0, 20.0, 10.0, 14.0, 96.0, 18.0, 10.0, 10.0, 10.0, 12.0, 14.0, 18.0,
     ];
@@ -310,8 +311,8 @@ fn write_line_sheet(
             write_metric_cell(worksheet, row, col, line.pmu_values.get(key), styles)?;
             col += 1;
         }
-        for key in SPE_COLUMNS {
-            write_metric_cell(worksheet, row, col, line.spe_values.get(*key), styles)?;
+        for key in &spe_columns {
+            write_metric_cell(worksheet, row, col, line.spe_values.get(key), styles)?;
             col += 1;
         }
         row += 1;

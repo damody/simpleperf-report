@@ -9,7 +9,7 @@ use super::bundle::SourceProfileBundle;
 use super::report_model::{
     build_report_model, instruction_class_column_keys, load_instruction_column_keys,
     metric_value_number, metric_value_text, pmu_column_keys, spe_column_keys, ReportModel,
-    INSTRUCTION_CLASS_NAMES, LOAD_INSTRUCTION_KIND_NAMES,
+    INSTRUCTION_CLASS_NAMES, LOAD_INSTRUCTION_KIND_NAMES, SPE_CATEGORY_NAMES,
 };
 use super::source_loader::{load_source_file, SourceLine};
 use super::summary::SourceReportSummary;
@@ -212,6 +212,10 @@ pub fn write_summary_workbook_from_model(
     let load_instruction = workbook.add_worksheet();
     load_instruction.set_name("LoadInstruction")?;
     write_load_instruction_sheet(load_instruction, model, &styles)?;
+
+    let spe_breakdown = workbook.add_worksheet();
+    spe_breakdown.set_name("SPEBreakdown")?;
+    write_spe_breakdown_sheet(spe_breakdown, model, &styles)?;
 
     let column_help = workbook.add_worksheet();
     column_help.set_name("Column Help")?;
@@ -491,6 +495,132 @@ fn write_load_instruction_sheet(
             }
             row += 1;
         }
+    }
+    Ok(())
+}
+
+fn write_spe_breakdown_sheet(
+    worksheet: &mut Worksheet,
+    model: &ReportModel,
+    styles: &WorkbookStyles,
+) -> Result<()> {
+    let headers = [
+        "CPU",
+        "Parent",
+        "Child",
+        "Level",
+        "sample%",
+        "est_time%",
+        "min_latency_cycles",
+        "max_latency_cycles",
+        "avg_latency_cycles",
+        "std_latency_cycles",
+        "p95_latency_cycles",
+        "p99_latency_cycles",
+        ">p95 est_time%",
+    ];
+    format_basic_sheet(
+        worksheet,
+        1,
+        (headers.len() - 1) as u16,
+        &[
+            8.0, 24.0, 24.0, 10.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 14.0,
+        ],
+    )?;
+    for (col, header) in headers.iter().enumerate() {
+        worksheet.write_string_with_format(0, col as u16, *header, &styles.header)?;
+    }
+
+    let metrics = [
+        "sample_pct",
+        "est_time_pct",
+        "min_latency_cycles",
+        "max_latency_cycles",
+        "avg_latency_cycles",
+        "std_latency_cycles",
+        "p95_latency_cycles",
+        "p99_latency_cycles",
+        "over_p95_est_time_pct",
+    ];
+    let mut row = 1_u32;
+    for (cpu, values_by_key) in &model.spe_hierarchical_cpu_values {
+        for parent in SPE_CATEGORY_NAMES {
+            if has_spe_breakdown_values(values_by_key, parent, &metrics) {
+                write_spe_breakdown_row(
+                    worksheet,
+                    row,
+                    *cpu,
+                    parent,
+                    "",
+                    "parent",
+                    parent,
+                    values_by_key,
+                    &metrics,
+                    styles,
+                )?;
+                row += 1;
+            }
+            for child in INSTRUCTION_CLASS_NAMES {
+                let prefix = format!("{parent}.{child}");
+                if !has_spe_breakdown_values(values_by_key, &prefix, &metrics) {
+                    continue;
+                }
+                write_spe_breakdown_row(
+                    worksheet,
+                    row,
+                    *cpu,
+                    parent,
+                    child,
+                    "child",
+                    &prefix,
+                    values_by_key,
+                    &metrics,
+                    styles,
+                )?;
+                row += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn has_spe_breakdown_values(
+    values_by_key: &std::collections::BTreeMap<String, super::metrics::MetricValue>,
+    prefix: &str,
+    metrics: &[&str],
+) -> bool {
+    metrics.iter().any(|metric| {
+        let key = format!("{prefix}.{metric}");
+        metric_value_number(values_by_key.get(&key)).is_some_and(|value| value != 0.0)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_spe_breakdown_row(
+    worksheet: &mut Worksheet,
+    row: u32,
+    cpu: u32,
+    parent: &str,
+    child: &str,
+    level: &str,
+    prefix: &str,
+    values_by_key: &std::collections::BTreeMap<String, super::metrics::MetricValue>,
+    metrics: &[&str],
+    styles: &WorkbookStyles,
+) -> Result<()> {
+    worksheet.write_number(row, 0, f64::from(cpu))?;
+    worksheet.write_string(row, 1, parent)?;
+    worksheet.write_string(row, 2, child)?;
+    worksheet.write_string(row, 3, level)?;
+    for (offset, metric) in metrics.iter().enumerate() {
+        let key = format!("{prefix}.{metric}");
+        write_metric_cell(
+            worksheet,
+            row,
+            (offset + 4) as u16,
+            values_by_key.get(&key),
+            styles,
+        )?;
     }
     Ok(())
 }
@@ -874,8 +1004,11 @@ fn write_capability_row(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
+    use std::process::Command;
 
+    use super::super::metrics::MetricValue;
     use super::*;
 
     #[test]
@@ -883,10 +1016,22 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
             SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let mut model = build_report_model(&bundle).unwrap();
+        model.spe_hierarchical_cpu_values.insert(
+            4,
+            BTreeMap::from([
+                ("load_l1.sample_pct".to_string(), MetricValue::Number(100.0)),
+                (
+                    "load_l1.vector_load.sample_pct".to_string(),
+                    MetricValue::Number(60.0),
+                ),
+            ]),
+        );
         let output = root.join("target/source_profile_tests/SourceLine.summary.xlsx");
-        write_summary_workbook(&bundle, &output).unwrap();
+        write_summary_workbook_from_model(&bundle, &model, &output).unwrap();
         assert!(output.exists());
-        assert!(std::fs::metadata(output).unwrap().len() > 0);
+        assert!(std::fs::metadata(&output).unwrap().len() > 0);
+        assert_workbook_has_sheet(&output, "SPEBreakdown");
     }
 
     #[test]
@@ -909,4 +1054,34 @@ mod tests {
         let lines = load_manifest_source_lines(&bundle).unwrap();
         assert!(lines.len() >= 18);
     }
+
+    #[cfg(windows)]
+    fn assert_workbook_has_sheet(output: &Path, sheet_name: &str) {
+        let extract_dir = output.with_extension("xlsx_unzipped");
+        let zip_path = output.with_extension("zip");
+        if extract_dir.exists() {
+            std::fs::remove_dir_all(&extract_dir).unwrap();
+        }
+        if zip_path.exists() {
+            std::fs::remove_file(&zip_path).unwrap();
+        }
+        std::fs::copy(output, &zip_path).unwrap();
+        let status = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "& { param($zip, $dest) Expand-Archive -LiteralPath $zip -DestinationPath $dest -Force }",
+            ])
+            .arg(&zip_path)
+            .arg(&extract_dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let workbook_xml = std::fs::read_to_string(extract_dir.join("xl/workbook.xml")).unwrap();
+        assert!(workbook_xml.contains(&format!("name=\"{sheet_name}\"")));
+    }
+
+    #[cfg(not(windows))]
+    fn assert_workbook_has_sheet(_output: &Path, _sheet_name: &str) {}
 }

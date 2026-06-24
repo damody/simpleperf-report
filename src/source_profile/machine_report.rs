@@ -10,7 +10,8 @@ use serde_json::json;
 use super::bundle::SourceProfileBundle;
 use super::report_model::{
     build_report_model, instruction_class_column_keys, load_instruction_column_keys,
-    metric_value_text, pmu_column_keys, spe_column_keys, ReportModel,
+    metric_value_number, metric_value_text, pmu_column_keys, spe_column_keys, ReportModel,
+    INSTRUCTION_CLASS_NAMES, SPE_CATEGORY_NAMES,
 };
 
 pub fn write_source_line_json(bundle: &SourceProfileBundle, output: &Path) -> Result<()> {
@@ -40,7 +41,9 @@ pub fn write_source_line_json_from_model(
             "pmu_buffer_pages": bundle.manifest.capture_options.pmu_buffer_pages,
             "spe_aux_buffer_bytes": bundle.manifest.capture_options.spe_aux_buffer_bytes,
             "instruction_cpu_class_values": metric_values_by_cpu_text(&model.instruction_cpu_class_values),
-            "load_cpu_kind_values": metric_values_by_cpu_text(&model.load_cpu_kind_values)
+            "load_cpu_kind_values": metric_values_by_cpu_text(&model.load_cpu_kind_values),
+            "spe_hierarchical_cpu_values": metric_values_by_cpu_text(&model.spe_hierarchical_cpu_values),
+            "spe_hierarchical_cpu_histograms": model.spe_hierarchical_cpu_histograms
         },
         "columns": columns(bundle),
         "rows": model.rows.iter().map(|row| row_to_values(row, bundle)).collect::<Vec<_>>(),
@@ -155,6 +158,11 @@ pub fn write_csv_exports_from_model(
             .iter()
             .map(callchain_to_values)
             .collect::<Vec<_>>(),
+    )?;
+    write_csv(
+        &output_dir.join("SPEBreakdown.csv"),
+        &spe_breakdown_columns(),
+        &spe_breakdown_rows(model),
     )
 }
 
@@ -291,6 +299,106 @@ fn callchain_to_values(row: &super::report_model::ReportCallchainRow) -> Vec<Str
     ]
 }
 
+fn spe_breakdown_columns() -> [&'static str; 13] {
+    [
+        "CPU",
+        "Parent",
+        "Child",
+        "Level",
+        "sample%",
+        "est_time%",
+        "min_latency_cycles",
+        "max_latency_cycles",
+        "avg_latency_cycles",
+        "std_latency_cycles",
+        "p95_latency_cycles",
+        "p99_latency_cycles",
+        ">p95 est_time%",
+    ]
+}
+
+fn spe_breakdown_metrics() -> [&'static str; 9] {
+    [
+        "sample_pct",
+        "est_time_pct",
+        "min_latency_cycles",
+        "max_latency_cycles",
+        "avg_latency_cycles",
+        "std_latency_cycles",
+        "p95_latency_cycles",
+        "p99_latency_cycles",
+        "over_p95_est_time_pct",
+    ]
+}
+
+fn spe_breakdown_rows(model: &ReportModel) -> Vec<Vec<String>> {
+    let metrics = spe_breakdown_metrics();
+    let mut rows = Vec::new();
+    for (cpu, values_by_key) in &model.spe_hierarchical_cpu_values {
+        for parent in SPE_CATEGORY_NAMES {
+            if has_spe_breakdown_values(values_by_key, parent, &metrics) {
+                rows.push(spe_breakdown_row(
+                    *cpu,
+                    parent,
+                    "",
+                    "parent",
+                    parent,
+                    values_by_key,
+                    &metrics,
+                ));
+            }
+            for child in INSTRUCTION_CLASS_NAMES {
+                let prefix = format!("{parent}.{child}");
+                if has_spe_breakdown_values(values_by_key, &prefix, &metrics) {
+                    rows.push(spe_breakdown_row(
+                        *cpu,
+                        parent,
+                        child,
+                        "child",
+                        &prefix,
+                        values_by_key,
+                        &metrics,
+                    ));
+                }
+            }
+        }
+    }
+    rows
+}
+
+fn has_spe_breakdown_values(
+    values_by_key: &BTreeMap<String, super::metrics::MetricValue>,
+    prefix: &str,
+    metrics: &[&str],
+) -> bool {
+    metrics.iter().any(|metric| {
+        let key = format!("{prefix}.{metric}");
+        metric_value_number(values_by_key.get(&key)).is_some_and(|value| value != 0.0)
+    })
+}
+
+fn spe_breakdown_row(
+    cpu: u32,
+    parent: &str,
+    child: &str,
+    level: &str,
+    prefix: &str,
+    values_by_key: &BTreeMap<String, super::metrics::MetricValue>,
+    metrics: &[&str],
+) -> Vec<String> {
+    let mut row = vec![
+        cpu.to_string(),
+        parent.to_string(),
+        child.to_string(),
+        level.to_string(),
+    ];
+    row.extend(metrics.iter().map(|metric| {
+        let key = format!("{prefix}.{metric}");
+        metric_value_text(values_by_key.get(&key))
+    }));
+    row
+}
+
 fn metric_values_by_cpu_text(
     values: &BTreeMap<u32, BTreeMap<String, super::metrics::MetricValue>>,
 ) -> BTreeMap<u32, BTreeMap<String, String>> {
@@ -340,8 +448,11 @@ fn csv_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
+    use super::super::metrics::MetricValue;
+    use super::super::report_model::{SpeLatencyHistogram, SpeLatencyHistogramBin};
     use super::*;
 
     #[test]
@@ -368,7 +479,8 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
             SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
-        let model = build_report_model(&bundle).unwrap();
+        let mut model = build_report_model(&bundle).unwrap();
+        add_spe_hierarchy_test_values(&mut model);
         let out = root.join("target/source_profile_tests/machine_from_model");
         write_source_line_json_from_model(&bundle, &model, &out.join("SourceLine.json")).unwrap();
         write_csv_exports_from_model(&bundle, &model, &out.join("csv")).unwrap();
@@ -376,9 +488,109 @@ mod tests {
         assert!(out.join("SourceLine.json").exists());
         assert!(out.join("csv/AllLines.csv").exists());
         assert!(out.join("csv/Callchains.csv").exists());
+        assert!(out.join("csv/SPEBreakdown.csv").exists());
         let json = fs::read_to_string(out.join("SourceLine.json")).unwrap();
         assert!(json.contains("load_cpu_kind_values"));
+        assert!(json.contains("spe_hierarchical_cpu_values"));
+        assert!(json.contains("spe_hierarchical_cpu_histograms"));
+        assert!(json.contains("load_l1.vector_load"));
         let csv = fs::read_to_string(out.join("csv/AllLines.csv")).unwrap();
         assert!(csv.contains("load_instruction.load_scalar_single.sample_pct"));
+        let spe_csv = fs::read_to_string(out.join("csv/SPEBreakdown.csv")).unwrap();
+        assert!(spe_csv.contains("CPU,Parent,Child,Level,sample%,est_time%,min_latency_cycles,max_latency_cycles,avg_latency_cycles,std_latency_cycles,p95_latency_cycles,p99_latency_cycles,>p95 est_time%"));
+        assert!(spe_csv.contains("4,load_l1,vector_load,child"));
+    }
+
+    fn add_spe_hierarchy_test_values(model: &mut ReportModel) {
+        model.spe_hierarchical_cpu_values.insert(
+            4,
+            BTreeMap::from([
+                ("load_l1.sample_pct".to_string(), MetricValue::Number(100.0)),
+                (
+                    "load_l1.est_time_pct".to_string(),
+                    MetricValue::Number(100.0),
+                ),
+                (
+                    "load_l1.min_latency_cycles".to_string(),
+                    MetricValue::Number(10.0),
+                ),
+                (
+                    "load_l1.max_latency_cycles".to_string(),
+                    MetricValue::Number(80.0),
+                ),
+                (
+                    "load_l1.avg_latency_cycles".to_string(),
+                    MetricValue::Number(45.0),
+                ),
+                (
+                    "load_l1.std_latency_cycles".to_string(),
+                    MetricValue::Number(20.0),
+                ),
+                (
+                    "load_l1.p95_latency_cycles".to_string(),
+                    MetricValue::Number(80.0),
+                ),
+                (
+                    "load_l1.p99_latency_cycles".to_string(),
+                    MetricValue::Number(80.0),
+                ),
+                (
+                    "load_l1.over_p95_est_time_pct".to_string(),
+                    MetricValue::Number(25.0),
+                ),
+                (
+                    "load_l1.vector_load.sample_pct".to_string(),
+                    MetricValue::Number(60.0),
+                ),
+                (
+                    "load_l1.vector_load.est_time_pct".to_string(),
+                    MetricValue::Number(70.0),
+                ),
+                (
+                    "load_l1.vector_load.min_latency_cycles".to_string(),
+                    MetricValue::Number(30.0),
+                ),
+                (
+                    "load_l1.vector_load.max_latency_cycles".to_string(),
+                    MetricValue::Number(80.0),
+                ),
+                (
+                    "load_l1.vector_load.avg_latency_cycles".to_string(),
+                    MetricValue::Number(55.0),
+                ),
+                (
+                    "load_l1.vector_load.std_latency_cycles".to_string(),
+                    MetricValue::Number(15.0),
+                ),
+                (
+                    "load_l1.vector_load.p95_latency_cycles".to_string(),
+                    MetricValue::Number(80.0),
+                ),
+                (
+                    "load_l1.vector_load.p99_latency_cycles".to_string(),
+                    MetricValue::Number(80.0),
+                ),
+                (
+                    "load_l1.vector_load.over_p95_est_time_pct".to_string(),
+                    MetricValue::Number(30.0),
+                ),
+            ]),
+        );
+        model.spe_hierarchical_cpu_histograms.insert(
+            4,
+            BTreeMap::from([(
+                "load_l1.vector_load".to_string(),
+                SpeLatencyHistogram {
+                    count: 2,
+                    min_latency_cycles: 30,
+                    max_latency_cycles: 80,
+                    bins: vec![SpeLatencyHistogramBin {
+                        start_latency_cycles: 30,
+                        end_latency_cycles: 80,
+                        count: 2,
+                    }],
+                },
+            )]),
+        );
     }
 }

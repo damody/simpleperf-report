@@ -641,10 +641,26 @@ impl SymbolNameCache {
             let Some(path) = matched.candidate_path.as_deref() else {
                 continue;
             };
-            let bytes = fs::read(path)
-                .with_context(|| format!("Failed to read ELF symbols from '{}'", path.display()))?;
-            let object = object::File::parse(&*bytes)
-                .with_context(|| format!("Failed to parse ELF '{}'", path.display()))?;
+            let bytes = match fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    eprintln!(
+                        "Warning: skipping ELF symbol cache for '{}': failed to read: {err}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
+            let object = match object::File::parse(&*bytes) {
+                Ok(object) => object,
+                Err(err) => {
+                    eprintln!(
+                        "Warning: skipping ELF symbol cache for '{}': failed to parse ELF: {err}",
+                        path.display()
+                    );
+                    continue;
+                }
+            };
             let mut symbols = Vec::new();
             collect_object_symbols(&object, &mut symbols);
             symbols.sort_by(|a, b| a.address.cmp(&b.address).then_with(|| b.size.cmp(&a.size)));
@@ -1863,5 +1879,32 @@ mod tests {
         assert!(!should_warn_missing_debug_elf(&os_match));
         assert!(!should_warn_missing_debug_elf(&pseudo_match));
         assert!(should_warn_missing_debug_elf(&app_match));
+    }
+
+    #[test]
+    fn symbol_name_cache_skips_unparseable_elf_candidates() {
+        let path = std::env::temp_dir().join(format!(
+            "mprofiler-unparseable-elf-{}.so",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"\x7fELF\x02\x01\x01")
+            .expect("write malformed ELF fixture");
+        let matches = BTreeMap::from([(
+            "libbad.so".to_string(),
+            crate::source_profile::symbol_resolver::ElfMatch {
+                module_id: "libbad.so".to_string(),
+                runtime_path: "/data/app/pkg/lib/arm64/libbad.so".to_string(),
+                candidate_path: Some(path.clone()),
+                quality: ElfMatchQuality::PathHint,
+                reason: "runtime filename match".to_string(),
+                has_dwarf_debug_info: false,
+            },
+        )]);
+
+        let cache = SymbolNameCache::from_matches(&matches)
+            .expect("unparseable debug ELF candidates should be skipped");
+
+        assert!(cache.by_module.is_empty());
+        let _ = std::fs::remove_file(path);
     }
 }

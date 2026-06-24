@@ -95,10 +95,20 @@ fn maybe_push_elf(path: &Path, candidates: &mut Vec<DebugElfCandidate>) -> Resul
     if !has_elf_magic(path)? {
         return Ok(());
     }
+    let has_dwarf_debug_info = match has_dwarf_debug_info(path) {
+        Ok(has_debug_info) => has_debug_info,
+        Err(err) => {
+            eprintln!(
+                "Warning: skipping debug ELF candidate '{}': failed to parse ELF: {err:#}",
+                path.display()
+            );
+            return Ok(());
+        }
+    };
     candidates.push(DebugElfCandidate {
         path: path.to_path_buf(),
         match_quality: ElfMatchQuality::PathHint,
-        has_dwarf_debug_info: has_dwarf_debug_info(path)?,
+        has_dwarf_debug_info,
     });
     Ok(())
 }
@@ -301,5 +311,19 @@ mod tests {
         let matches = match_debug_elfs(&build_ids.modules, &candidates).unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].quality, ElfMatchQuality::BuildIdExact);
+    }
+
+    #[test]
+    fn discover_debug_elfs_skips_unparseable_elf_candidates() {
+        let path = std::env::temp_dir().join(format!(
+            "mprofiler-discover-unparseable-elf-{}.so",
+            std::process::id()
+        ));
+        fs::write(&path, b"\x7fELF\x02\x01\x01").unwrap();
+
+        let candidates = discover_debug_elfs(&[path.clone()]).unwrap();
+
+        assert!(candidates.is_empty());
+        let _ = fs::remove_file(path);
     }
 }

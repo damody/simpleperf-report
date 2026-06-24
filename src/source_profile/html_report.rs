@@ -6,9 +6,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use super::bundle::SourceProfileBundle;
+use super::metrics::MetricValue;
 use super::report_model::{
     build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, spe_column_keys, ReportModel,
-    SPE_CATEGORY_METRICS,
+    SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES,
 };
 use super::summary::SourceReportSummary;
 
@@ -132,6 +133,13 @@ pub fn write_html_summary_from_model(
     <tr><td>SPE AUX buffer bytes</td><td>{spe_aux_buffer_bytes}</td></tr>
     <tr><td>Sample period</td><td>{sample_period}</td></tr>
     <tr><td>Callchain depth</td><td>{callchain_depth}</td></tr>
+  </table>
+  </details>
+  <details class="report-section" open>
+  <summary>SPE Category Summary</summary>
+  <table>
+    <tr><th>Category</th><th>sample%</th><th>pmu_cycles%</th><th>spe_latency%</th><th>est_time%</th></tr>
+    {spe_category_summary_rows}
   </table>
   </details>
   <details class="report-section" open>
@@ -563,6 +571,8 @@ pub fn write_html_summary_from_model(
         derived_pmu_columns_json = derived_pmu_columns_json,
         spe_columns_json = spe_columns_json,
         default_source_columns_json = default_source_columns_json,
+        spe_category_summary_rows =
+            spe_category_summary_rows_html(model, manifest.lanes.spe.available),
         column_help_rows =
             column_help_rows(bundle, &raw_pmu_columns, &derived_pmu_columns, &spe_columns),
         quality_rows = quality_rows(bundle),
@@ -583,6 +593,90 @@ pub fn write_html_summary_from_model(
         callchain_rows = callchain_rows_html(&model.callchains)
     );
     fs::write(output, html).with_context(|| format!("Failed to write '{}'", output.display()))
+}
+
+fn spe_category_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
+    let metrics = [
+        ("sample_pct", false),
+        ("pmu_cycles_pct", false),
+        ("spe_latency_pct", true),
+        ("est_time_pct", false),
+    ];
+    let rows = SPE_CATEGORY_NAMES
+        .iter()
+        .map(|category| {
+            let cells = metrics
+                .iter()
+                .map(|(metric, show_na)| {
+                    let key = format!("{category}.{metric}");
+                    let value = summarize_spe_category_metric(model, &key, *show_na);
+                    format!("<td>{}</td>", escape_html(&value))
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                "<tr><td><code>{}</code></td>{}</tr>",
+                escape_html(category),
+                cells
+            )
+        })
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        let status = if spe_available {
+            "No SPE category rows"
+        } else {
+            "Missing"
+        };
+        return format!("<tr><td colspan=\"5\">{status}</td></tr>");
+    }
+    rows.join("\n")
+}
+
+fn summarize_spe_category_metric(
+    model: &ReportModel,
+    key: &str,
+    show_na_for_undefined: bool,
+) -> String {
+    let mut sum = 0.0;
+    let mut saw_number = false;
+    let mut saw_missing = false;
+    let mut saw_unresolved = false;
+    let mut saw_undefined = false;
+    for row in &model.rows {
+        match row.spe_values.get(key) {
+            Some(MetricValue::Number(value)) => {
+                saw_number = true;
+                sum += value;
+            }
+            Some(MetricValue::Missing(_)) | None => saw_missing = true,
+            Some(MetricValue::Unresolved(_)) => saw_unresolved = true,
+            Some(MetricValue::Undefined(_)) => saw_undefined = true,
+        }
+    }
+    if saw_number {
+        return format_percentage_for_summary(sum);
+    }
+    if saw_undefined && show_na_for_undefined {
+        return "N/A".to_string();
+    }
+    if saw_unresolved {
+        return "Unresolved".to_string();
+    }
+    if saw_missing {
+        return "Missing".to_string();
+    }
+    if saw_undefined {
+        return "N/A".to_string();
+    }
+    "Missing".to_string()
+}
+
+fn format_percentage_for_summary(value: f64) -> String {
+    if value.abs() >= 1000.0 {
+        format!("{value:.0}%")
+    } else {
+        format!("{value:.3}%")
+    }
 }
 
 fn column_help_rows(
@@ -980,10 +1074,18 @@ mod tests {
             html.contains("<details class=\"report-section\" open>\n  <summary>Summary</summary>")
         );
         let summary_pos = html.find("<summary>Summary</summary>").unwrap();
+        let spe_summary_pos = html
+            .find("<summary>SPE Category Summary</summary>")
+            .unwrap();
         let column_help_pos = html.find("<summary>Column Help</summary>").unwrap();
         let source_lines_pos = html.find("<summary>Source Lines</summary>").unwrap();
-        assert!(summary_pos < column_help_pos);
+        assert!(summary_pos < spe_summary_pos);
+        assert!(spe_summary_pos < column_help_pos);
         assert!(column_help_pos < source_lines_pos);
+        assert!(html.contains("<th>Category</th><th>sample%</th><th>pmu_cycles%</th><th>spe_latency%</th><th>est_time%</th>"));
+        assert!(html.contains("<tr><td><code>cpu_instruction</code></td>"));
+        assert!(html.contains("<tr><td><code>store_l1</code></td>"));
+        assert!(html.contains("<tr><td><code>load_dram</code></td>"));
         assert!(html
             .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
         assert!(html.contains("Formula / Source"));

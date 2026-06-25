@@ -9,10 +9,9 @@ use anyhow::{Context, Result};
 use super::bundle::SourceProfileBundle;
 use super::metrics::MetricValue;
 use super::report_model::{
-    build_report_model, instruction_class_column_keys, load_instruction_column_keys,
-    pmu_derived_column_keys, pmu_raw_column_keys, ReportModel, INSTRUCTION_CLASS_METRICS,
-    INSTRUCTION_CLASS_NAMES, LOAD_INSTRUCTION_KIND_NAMES, LOAD_INSTRUCTION_METRICS,
-    SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES, SPE_COLUMNS,
+    build_report_model, pmu_derived_column_keys, pmu_raw_column_keys, ReportModel,
+    INSTRUCTION_CLASS_METRICS, INSTRUCTION_CLASS_NAMES, LOAD_INSTRUCTION_KIND_NAMES,
+    LOAD_INSTRUCTION_METRICS, SPE_CATEGORY_METRICS, SPE_CATEGORY_NAMES,
 };
 use super::summary::SourceReportSummary;
 
@@ -181,7 +180,7 @@ pub fn write_html_summary_from_model(
     <div id="speBreakdownColumnPicker" class="column-picker-controls"></div>
   </details>
   <table class="spe-summary-table">
-    <tr><th data-spe-column="cpu">CPU</th><th data-spe-column="category">Category</th><th data-spe-column="sample_pct">sample%</th><th data-spe-column="est_time_pct">est_time%</th><th data-spe-column="all_est_time_pct">all est_time%</th><th data-spe-column="min_latency_cycles">min_latency_cycles</th><th data-spe-column="max_latency_cycles">max_latency_cycles</th><th data-spe-column="avg_latency_cycles">avg_latency_cycles</th><th data-spe-column="std_latency_cycles">std_latency_cycles</th><th data-spe-column="p95_latency_cycles">p95_latency_cycles</th><th data-spe-column="p99_latency_cycles">p99_latency_cycles</th><th data-spe-column="over_p95_est_time_pct">&gt;p95 est_time%</th><th data-spe-column="over_avg_est_time_pct">&gt;avg est_time%</th><th data-spe-column="over_p95_all_est_time_pct">&gt;p95 all est_time%</th><th data-spe-column="over_avg_all_est_time_pct">&gt;avg all est_time%</th></tr>
+    <tr><th data-spe-column="cpu">CPU</th><th data-spe-column="category">Category</th><th data-spe-column="sample_pct">sample%</th><th data-spe-column="est_time_pct">est_time%</th><th data-spe-column="all_est_time_pct">all est_time%</th><th data-spe-column="min_latency_cycles">min_latency_cycles</th><th data-spe-column="max_latency_cycles">max_latency_cycles</th><th data-spe-column="avg_latency_cycles">avg_latency_cycles</th><th data-spe-column="std_latency_cycles">std_latency_cycles</th><th data-spe-column="p95_latency_cycles">p95_latency_cycles</th><th data-spe-column="p99_latency_cycles">p99_latency_cycles</th><th data-spe-column="over_theory_sample_pct">&gt;theory sample%</th><th data-spe-column="over_theory_est_time_pct">&gt;theory est_time%</th><th data-spe-column="over_p95_est_time_pct">&gt;p95 est_time%</th><th data-spe-column="over_avg_est_time_pct">&gt;avg est_time%</th><th data-spe-column="over_p95_all_est_time_pct">&gt;p95 all est_time%</th><th data-spe-column="over_avg_all_est_time_pct">&gt;avg all est_time%</th></tr>
     {spe_hierarchy_summary_rows}
   </table>
   <div id="speHierarchyHistogram" class="spe-histogram-panel" hidden></div>
@@ -304,6 +303,8 @@ pub fn write_html_summary_from_model(
       {{ key: "std_latency_cycles", label: "std_latency_cycles" }},
       {{ key: "p95_latency_cycles", label: "p95_latency_cycles" }},
       {{ key: "p99_latency_cycles", label: "p99_latency_cycles" }},
+      {{ key: "over_theory_sample_pct", label: ">theory sample%" }},
+      {{ key: "over_theory_est_time_pct", label: ">theory est_time%" }},
       {{ key: "over_p95_est_time_pct", label: ">p95 est_time%" }},
       {{ key: "over_avg_est_time_pct", label: ">avg est_time%" }},
       {{ key: "over_p95_all_est_time_pct", label: ">p95 all est_time%" }},
@@ -829,68 +830,36 @@ pub fn write_html_summary_from_model(
 }
 
 fn default_spe_source_columns(spe_columns: &[String], model: &ReportModel) -> Vec<String> {
-    let mut columns = [
-        "spe_sample_count",
-        "spe_latency_cycles_avg",
-        "spe_decode_errors",
-    ]
-    .into_iter()
-    .filter(|key| spe_columns.iter().any(|column| column == key))
-    .map(str::to_string)
-    .collect::<Vec<_>>();
+    let mut columns = ["spe_sample_count"]
+        .into_iter()
+        .filter(|key| spe_columns.iter().any(|column| column == key))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
 
     for category in SPE_CATEGORY_NAMES {
-        for metric in [
-            "est_time_pct",
-            "min_latency_cycles",
-            "max_latency_cycles",
-            "avg_latency_cycles",
-            "std_latency_cycles",
-        ] {
-            let key = format!("{category}.{metric}");
-            if spe_columns.iter().any(|column| column == &key)
-                && !is_zero_or_absent_summary(&summarize_spe_category_metric(model, &key, false))
-            {
-                columns.push(key);
-            }
+        let key = format!("{category}.sample_count");
+        if spe_columns.iter().any(|column| column == &key)
+            && !is_zero_or_absent_summary(&summarize_spe_category_metric(model, &key, false))
+        {
+            columns.push(key);
         }
     }
 
     for class in INSTRUCTION_CLASS_NAMES {
-        for metric in [
-            "est_time_pct",
-            "min_latency_cycles",
-            "max_latency_cycles",
-            "avg_latency_cycles",
-            "std_latency_cycles",
-        ] {
-            let key = format!("instruction_class.{class}.{metric}");
-            if spe_columns.iter().any(|column| column == &key)
-                && !is_zero_or_absent_summary(&summarize_instruction_class_metric(
-                    model, &key, false,
-                ))
-            {
-                columns.push(key);
-            }
+        let key = format!("instruction_class.{class}.sample_count");
+        if spe_columns.iter().any(|column| column == &key)
+            && !is_zero_or_absent_summary(&summarize_instruction_class_metric(model, &key, false))
+        {
+            columns.push(key);
         }
     }
 
     for kind in LOAD_INSTRUCTION_KIND_NAMES {
-        for metric in [
-            "est_time_pct",
-            "min_latency_cycles",
-            "max_latency_cycles",
-            "avg_latency_cycles",
-            "std_latency_cycles",
-        ] {
-            let key = format!("load_instruction.{kind}.{metric}");
-            if spe_columns.iter().any(|column| column == &key)
-                && !is_zero_or_absent_summary(&summarize_load_instruction_metric(
-                    model, &key, false,
-                ))
-            {
-                columns.push(key);
-            }
+        let key = format!("load_instruction.{kind}.sample_count");
+        if spe_columns.iter().any(|column| column == &key)
+            && !is_zero_or_absent_summary(&summarize_load_instruction_metric(model, &key, false))
+        {
+            columns.push(key);
         }
     }
 
@@ -898,27 +867,13 @@ fn default_spe_source_columns(spe_columns: &[String], model: &ReportModel) -> Ve
 }
 
 fn displayed_spe_column_keys(model: &ReportModel) -> Vec<String> {
-    let mut keys = SPE_COLUMNS
-        .iter()
-        .map(|key| (*key).to_string())
-        .collect::<Vec<_>>();
+    let mut keys = vec!["spe_sample_count".to_string()];
 
     for category in SPE_CATEGORY_NAMES {
-        let values = SPE_CATEGORY_METRICS
-            .iter()
-            .map(|metric| {
-                let key = format!("{category}.{metric}");
-                summarize_spe_category_metric(model, &key, *metric == "spe_latency_pct")
-            })
-            .collect::<Vec<_>>();
-        if values.iter().all(|value| is_zero_or_absent_summary(value)) {
-            continue;
+        let key = format!("{category}.sample_count");
+        if !is_zero_or_absent_summary(&summarize_spe_category_metric(model, &key, false)) {
+            keys.push(key);
         }
-        keys.extend(
-            SPE_CATEGORY_METRICS
-                .iter()
-                .map(|metric| format!("{category}.{metric}")),
-        );
     }
 
     keys
@@ -927,22 +882,10 @@ fn displayed_spe_column_keys(model: &ReportModel) -> Vec<String> {
 fn displayed_instruction_class_column_keys(model: &ReportModel) -> Vec<String> {
     let mut keys = Vec::new();
     for class in INSTRUCTION_CLASS_NAMES {
-        let values = INSTRUCTION_CLASS_METRICS
-            .iter()
-            .map(|metric| {
-                let key = format!("instruction_class.{class}.{metric}");
-                summarize_instruction_class_metric(model, &key, *metric == "spe_latency_pct")
-            })
-            .collect::<Vec<_>>();
-        if values.iter().all(|value| is_zero_or_absent_summary(value)) {
-            continue;
+        let key = format!("instruction_class.{class}.sample_count");
+        if !is_zero_or_absent_summary(&summarize_instruction_class_metric(model, &key, false)) {
+            keys.push(key);
         }
-        keys.extend(instruction_class_column_keys().into_iter().filter(|key| {
-            key.strip_prefix("instruction_class.")
-                .and_then(|rest| rest.split_once('.'))
-                .map(|(name, _)| name == *class)
-                .unwrap_or(false)
-        }));
     }
     keys
 }
@@ -950,22 +893,10 @@ fn displayed_instruction_class_column_keys(model: &ReportModel) -> Vec<String> {
 fn displayed_load_instruction_column_keys(model: &ReportModel) -> Vec<String> {
     let mut keys = Vec::new();
     for kind in LOAD_INSTRUCTION_KIND_NAMES {
-        let values = LOAD_INSTRUCTION_METRICS
-            .iter()
-            .map(|metric| {
-                let key = format!("load_instruction.{kind}.{metric}");
-                summarize_load_instruction_metric(model, &key, *metric == "spe_latency_pct")
-            })
-            .collect::<Vec<_>>();
-        if values.iter().all(|value| is_zero_or_absent_summary(value)) {
-            continue;
+        let key = format!("load_instruction.{kind}.sample_count");
+        if !is_zero_or_absent_summary(&summarize_load_instruction_metric(model, &key, false)) {
+            keys.push(key);
         }
-        keys.extend(load_instruction_column_keys().into_iter().filter(|key| {
-            key.strip_prefix("load_instruction.")
-                .and_then(|rest| rest.split_once('.'))
-                .map(|(name, _)| name == *kind)
-                .unwrap_or(false)
-        }));
     }
     keys
 }
@@ -981,6 +912,12 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         ("std_latency_cycles", "std_latency_cycles", false),
         ("p95_latency_cycles", "p95_latency_cycles", false),
         ("p99_latency_cycles", "p99_latency_cycles", false),
+        ("over_theory_sample_pct", "over_theory_sample_pct", false),
+        (
+            "over_theory_est_time_pct",
+            "over_theory_est_time_pct",
+            false,
+        ),
         ("over_p95_est_time_pct", "over_p95_est_time_pct", false),
         ("over_avg_est_time_pct", "over_avg_est_time_pct", false),
         (
@@ -995,7 +932,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         ),
     ];
     if !spe_available {
-        return "<tr><td colspan=\"15\">SPE samples unavailable</td></tr>".to_string();
+        return "<tr><td colspan=\"17\">SPE samples unavailable</td></tr>".to_string();
     }
 
     let rows = model
@@ -1007,7 +944,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                     .iter()
                     .map(|(_, metric, show_na)| {
                         let key = format!("{parent}.{metric}");
-                        summarize_spe_category_metric_from_values(values_by_key, &key, *show_na)
+                        summarize_spe_hierarchy_metric_from_values(values_by_key, &key, *show_na)
                     })
                     .collect::<Vec<_>>();
                 if parent_values
@@ -1037,10 +974,10 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                             .iter()
                             .map(|(_, metric, show_na)| {
                                 let key = format!("{parent}.{child}.{metric}");
-                                summarize_spe_category_metric_from_values(
-                                    values_by_key,
-                                    &key,
-                                    *show_na,
+                                    summarize_spe_hierarchy_metric_from_values(
+                                        values_by_key,
+                                        &key,
+                                        *show_na,
                                 )
                             })
                             .collect::<Vec<_>>();
@@ -1096,7 +1033,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
-        return "<tr><td colspan=\"15\">No SPE hierarchy samples</td></tr>".to_string();
+        return "<tr><td colspan=\"17\">No SPE hierarchy samples</td></tr>".to_string();
     }
     rows.join("\n")
 }
@@ -1249,6 +1186,22 @@ fn summarize_spe_category_metric_from_values(
         None => "0".to_string(),
         Some(MetricValue::Undefined(_)) => "N/A".to_string(),
     }
+}
+
+fn summarize_spe_hierarchy_metric_from_values(
+    values: &BTreeMap<String, MetricValue>,
+    key: &str,
+    show_na_for_undefined: bool,
+) -> String {
+    if is_spe_theory_metric_key(key) && !values.contains_key(key) {
+        String::new()
+    } else {
+        summarize_spe_category_metric_from_values(values, key, show_na_for_undefined)
+    }
+}
+
+fn is_spe_theory_metric_key(key: &str) -> bool {
+    key.ends_with(".over_theory_sample_pct") || key.ends_with(".over_theory_est_time_pct")
 }
 
 fn format_metric_for_summary(key: &str, value: f64) -> String {
@@ -1534,6 +1487,16 @@ fn spe_hierarchical_breakdown_help_rows() -> Vec<String> {
             "此 row 的 p99 latency 門檻；描述最慢 1% 附近的延遲水準。它對樣本數較敏感，樣本很少時應視為方向性訊號。",
         ),
         help_row(
+            "SPE Hierarchical Breakdown: >theory sample%",
+            "samples where latency cycles > theoretical threshold / latency samples in this row",
+            "超過理論 latency 的 sample 數比例；目前只套用 load_l1=4T、load_l2=10T、load_l3=60T、store*=3T，其它分類留空。它描述超標事件發生頻率，不代表超標事件耗掉多少時間。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: >theory est_time%",
+            "latency cycles where latency cycles > theoretical threshold / row latency cycles",
+            "超過理論 latency 的 samples 所累積的 latency cycles，佔此 row 總 latency 的比例；目前只套用 load_l1=4T、load_l2=10T、load_l3=60T、store*=3T，其它分類留空。它比 sample% 更能看出超標事件是否真的吃掉主要等待時間。",
+        ),
+        help_row(
             "SPE Hierarchical Breakdown: >p95 est_time%",
             "latency cycles where sample latency > row p95 / row latency cycles",
             "此 row 內 latency 超過 p95 的 samples 所累積的 latency cycles，佔此 row 自身總 latency 的比例。它回答「這個分類自己的時間有多少被最慢那段長尾吃掉」。",
@@ -1561,7 +1524,7 @@ fn is_spe_category_metric(key: &str) -> bool {
         .map(|(category, metric)| {
             !category.starts_with("instruction_class.")
                 && !category.starts_with("load_instruction.")
-                && SPE_CATEGORY_METRICS.contains(&metric)
+                && (metric == "sample_count" || SPE_CATEGORY_METRICS.contains(&metric))
         })
         .unwrap_or(false)
 }
@@ -1570,18 +1533,21 @@ fn is_instruction_class_metric(key: &str) -> bool {
     let Some((prefix, metric)) = key.rsplit_once('.') else {
         return false;
     };
-    prefix.starts_with("instruction_class.") && INSTRUCTION_CLASS_METRICS.contains(&metric)
+    prefix.starts_with("instruction_class.")
+        && (metric == "sample_count" || INSTRUCTION_CLASS_METRICS.contains(&metric))
 }
 
 fn is_load_instruction_metric(key: &str) -> bool {
     let Some((prefix, metric)) = key.rsplit_once('.') else {
         return false;
     };
-    prefix.starts_with("load_instruction.") && LOAD_INSTRUCTION_METRICS.contains(&metric)
+    prefix.starts_with("load_instruction.")
+        && (metric == "sample_count" || LOAD_INSTRUCTION_METRICS.contains(&metric))
 }
 
 fn instruction_class_metric_formula(key: &str) -> &'static str {
     match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_count") => "instruction-class SPE sample count",
         Some("sample_pct") => "instruction-class SPE samples / total SPE samples",
         Some("spe_latency_pct") => {
             "instruction-class SPE latency cycles / total SPE latency cycles"
@@ -1617,6 +1583,9 @@ fn instruction_class_metric_formula(key: &str) -> &'static str {
 
 fn instruction_class_metric_meaning(key: &str) -> &'static str {
     match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_count") => {
+            "此 source line 歸因到這個 instruction class 的 SPE sample 數；Source Lines 只做 sample 計數，不把單行抽樣點解讀成 latency 或時間分布。"
+        }
         Some("sample_pct") => {
             "此 instruction class 在 SPE samples 中出現的比例；物理上代表硬體抽樣到的指令種類分布，不等同執行時間。"
         }
@@ -1661,6 +1630,7 @@ fn instruction_class_metric_meaning(key: &str) -> &'static str {
 
 fn load_instruction_metric_formula(key: &str) -> &'static str {
     match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_count") => "load-kind SPE sample count",
         Some("sample_pct") => "load-kind SPE samples / total load instruction SPE samples",
         Some("spe_latency_pct") => {
             "load-kind SPE latency cycles / total load instruction SPE latency cycles"
@@ -1696,6 +1666,9 @@ fn load_instruction_metric_formula(key: &str) -> &'static str {
 
 fn load_instruction_metric_meaning(key: &str) -> &'static str {
     match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_count") => {
+            "此 source line 歸因到這個 load instruction kind 的 SPE sample 數；Source Lines 只顯示抽樣次數，避免把單行樣本誤解為 latency 統計。"
+        }
         Some("sample_pct") => {
             "此 load instruction kind 在 load 類 SPE samples 中出現的比例；物理上代表硬體抽樣到的 load 指令型態分布，不等同耗時。"
         }
@@ -1740,6 +1713,7 @@ fn load_instruction_metric_meaning(key: &str) -> &'static str {
 
 fn spe_category_metric_formula(key: &str) -> &'static str {
     match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_count") => "category SPE sample count",
         Some("sample_pct") => "category SPE samples / total SPE samples",
         Some("spe_latency_pct") => "category SPE latency cycles / total SPE latency cycles",
         Some("est_time_pct") => "estimated time percentage",
@@ -1775,6 +1749,9 @@ fn spe_category_metric_meaning(key: &str) -> &'static str {
         return "SPE 捕捉到非 load/store/branch 的操作，但目前尚未把 sampled PC 的 opcode 細分成 int、FP/SIMD 或 crypto，因此先歸在 compute_unknown；它表示這段時間主要不是明確的記憶體或分支事件。";
     }
     match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_count") => {
+            "此 source line 歸因到這個 SPE category 的 sample 數；Source Lines 只顯示抽樣命中次數，避免把單行樣本誤解為 latency 或時間統計。"
+        }
         Some("sample_pct") => {
             "此 SPE category 在整份 session 中的 sample 數量比例；物理上代表硬體抽樣到此類 data source 或 operation 的頻率，不是時間佔比。"
         }
@@ -2072,7 +2049,7 @@ mod tests {
         assert!(!html.contains("<summary>Load Instruction Summary</summary>"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
-        assert!(html.contains("<tr><td colspan=\"15\">SPE samples unavailable</td></tr>"));
+        assert!(html.contains("<tr><td colspan=\"17\">SPE samples unavailable</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
         assert!(
             html.contains("<details class=\"report-section\">\n  <summary>Column Help</summary>")
@@ -2085,10 +2062,12 @@ mod tests {
         assert!(html.contains("取樣位址經符號化與 debug line table 對應後落到的原始碼檔案"));
         assert!(html.contains("平均每退休一條指令消耗的 CPU cycles"));
         assert!(html.contains("每秒百萬退休指令"));
-        assert!(html.contains("SPE 記錄的平均 latency cycles"));
+        assert!(!html.contains("SPE 記錄的平均 latency cycles"));
         assert!(html.contains("SPE Hierarchical Breakdown: sample%"));
         assert!(html.contains("SPE Hierarchical Breakdown: est_time%"));
         assert!(html.contains("SPE Hierarchical Breakdown: all est_time%"));
+        assert!(html.contains("SPE Hierarchical Breakdown: &gt;theory sample%"));
+        assert!(html.contains("load_l1=4T、load_l2=10T、load_l3=60T、store*=3T"));
         assert!(html.contains("子節點是 parent-relative"));
         assert!(html.contains("全域估算時間佔比"));
         assert!(html.contains("適合比較展開後哪個子項真正佔整體 latency"));
@@ -2156,8 +2135,8 @@ mod tests {
         assert!(!default_columns.contains("\"file_acc_p_pct\""));
         assert!(!default_columns.contains("\"status\""));
         assert!(default_columns.contains("\"spe_sample_count\""));
-        assert!(default_columns.contains("\"spe_latency_cycles_avg\""));
-        assert!(default_columns.contains("\"spe_decode_errors\""));
+        assert!(!default_columns.contains("\"spe_latency_cycles_avg\""));
+        assert!(!default_columns.contains("\"spe_decode_errors\""));
         assert!(!default_columns.contains("\"load_l1.est_time_pct\""));
         assert!(!default_columns.contains("\"load_l2.est_time_pct\""));
         assert!(!default_columns.contains("\"load_l3.est_time_pct\""));
@@ -2208,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn displayed_spe_columns_hide_zero_category_metrics() {
+    fn displayed_spe_columns_show_only_nonzero_sample_counts() {
         let model = ReportModel {
             rows: vec![ReportLineRow {
                 file: "src/main.cpp".to_string(),
@@ -2228,6 +2207,7 @@ mod tests {
                 file_acc_p_pct: 0.0,
                 pmu_values: BTreeMap::new(),
                 spe_values: BTreeMap::from([
+                    ("load_l1.sample_count".to_string(), MetricValue::Number(3.0)),
                     ("load_l1.sample_pct".to_string(), MetricValue::Number(10.0)),
                     (
                         "load_l1.spe_latency_pct".to_string(),
@@ -2236,6 +2216,10 @@ mod tests {
                     (
                         "load_l1.est_time_pct".to_string(),
                         MetricValue::Number(12.0),
+                    ),
+                    (
+                        "load_llc.sample_count".to_string(),
+                        MetricValue::Number(0.0),
                     ),
                     ("load_llc.sample_pct".to_string(), MetricValue::Number(0.0)),
                     (
@@ -2247,8 +2231,34 @@ mod tests {
                         MetricValue::Number(0.0),
                     ),
                 ]),
-                instruction_values: BTreeMap::new(),
-                load_instruction_values: BTreeMap::new(),
+                instruction_values: BTreeMap::from([
+                    (
+                        "instruction_class.compute_int.sample_count".to_string(),
+                        MetricValue::Number(2.0),
+                    ),
+                    (
+                        "instruction_class.compute_int.sample_pct".to_string(),
+                        MetricValue::Number(50.0),
+                    ),
+                    (
+                        "instruction_class.compute_int.avg_latency_cycles".to_string(),
+                        MetricValue::Number(30.0),
+                    ),
+                ]),
+                load_instruction_values: BTreeMap::from([
+                    (
+                        "load_instruction.load_scalar_single.sample_count".to_string(),
+                        MetricValue::Number(1.0),
+                    ),
+                    (
+                        "load_instruction.load_scalar_single.sample_pct".to_string(),
+                        MetricValue::Number(25.0),
+                    ),
+                    (
+                        "load_instruction.load_scalar_single.est_time_pct".to_string(),
+                        MetricValue::Number(25.0),
+                    ),
+                ]),
                 detail: String::new(),
             }],
             files: Vec::new(),
@@ -2265,9 +2275,26 @@ mod tests {
         };
 
         let columns = displayed_spe_column_keys(&model);
+        let instruction_columns = displayed_instruction_class_column_keys(&model);
+        let load_instruction_columns = displayed_load_instruction_column_keys(&model);
 
-        assert!(columns.contains(&"load_l1.est_time_pct".to_string()));
-        assert!(!columns.contains(&"load_llc.est_time_pct".to_string()));
+        assert!(columns.contains(&"load_l1.sample_count".to_string()));
+        assert!(!columns.contains(&"load_l1.sample_pct".to_string()));
+        assert!(!columns.contains(&"load_l1.est_time_pct".to_string()));
+        assert!(!columns.contains(&"load_l1.avg_latency_cycles".to_string()));
+        assert!(!columns.contains(&"load_llc.sample_count".to_string()));
+        assert!(
+            instruction_columns.contains(&"instruction_class.compute_int.sample_count".to_string())
+        );
+        assert!(
+            !instruction_columns.contains(&"instruction_class.compute_int.sample_pct".to_string())
+        );
+        assert!(!instruction_columns
+            .contains(&"instruction_class.compute_int.avg_latency_cycles".to_string()));
+        assert!(load_instruction_columns
+            .contains(&"load_instruction.load_scalar_single.sample_count".to_string()));
+        assert!(!load_instruction_columns
+            .contains(&"load_instruction.load_scalar_single.est_time_pct".to_string()));
     }
 
     #[test]
@@ -2338,6 +2365,14 @@ mod tests {
                         MetricValue::Number(80.0),
                     ),
                     (
+                        "load_l1.over_theory_sample_pct".to_string(),
+                        MetricValue::Number(100.0),
+                    ),
+                    (
+                        "load_l1.over_theory_est_time_pct".to_string(),
+                        MetricValue::Number(100.0),
+                    ),
+                    (
                         "load_l1.over_p95_est_time_pct".to_string(),
                         MetricValue::Number(25.0),
                     ),
@@ -2390,6 +2425,14 @@ mod tests {
                         MetricValue::Number(80.0),
                     ),
                     (
+                        "load_l1.vector_load.over_theory_sample_pct".to_string(),
+                        MetricValue::Number(50.0),
+                    ),
+                    (
+                        "load_l1.vector_load.over_theory_est_time_pct".to_string(),
+                        MetricValue::Number(55.0),
+                    ),
+                    (
                         "load_l1.vector_load.over_p95_est_time_pct".to_string(),
                         MetricValue::Number(30.0),
                     ),
@@ -2440,6 +2483,8 @@ mod tests {
         assert!(rows.contains("<td data-spe-column=\"cpu\">4</td>"));
         assert!(rows.contains("<td data-spe-column=\"est_time_pct\">100.000%</td>"));
         assert!(rows.contains("<td data-spe-column=\"all_est_time_pct\">100.000%</td>"));
+        assert!(rows.contains("<td data-spe-column=\"over_theory_sample_pct\">100.000%</td>"));
+        assert!(rows.contains("<td data-spe-column=\"over_theory_est_time_pct\">100.000%</td>"));
         assert!(rows.contains("<td data-spe-column=\"over_avg_all_est_time_pct\">35.000%</td>"));
         assert!(
             rows.contains("<span class=\"spe-collapse-indicator\">+</span><code>load_l1</code>")
@@ -2452,6 +2497,8 @@ mod tests {
             "data-spe-child=\"vector_load\" onclick=\"renderSpeHierarchyHistogram(this)\" hidden"
         ));
         assert!(rows.contains("<td data-spe-column=\"all_est_time_pct\">12.500%</td>"));
+        assert!(rows.contains("<td data-spe-column=\"over_theory_sample_pct\">50.000%</td>"));
+        assert!(rows.contains("<td data-spe-column=\"over_theory_est_time_pct\">55.000%</td>"));
         assert!(rows.contains("onclick=\"renderSpeHierarchyHistogram(this)\""));
         assert!(rows.contains("class=\"spe-child-label\""));
 
@@ -2626,7 +2673,7 @@ mod tests {
                 file_acc_p_pct: 0.0,
                 pmu_values: BTreeMap::new(),
                 spe_values: BTreeMap::from([(
-                    "compute_unknown.sample_pct".to_string(),
+                    "compute_unknown.sample_count".to_string(),
                     MetricValue::Number(100.0),
                 )]),
                 instruction_values: BTreeMap::new(),

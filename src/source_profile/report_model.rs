@@ -1594,6 +1594,68 @@ fn make_spe_hierarchy_metric_values(
         Some(all_latency_cycles as f64),
         1.0,
     ));
+    values.extend(spe_hierarchy_theory_metric_values(
+        name,
+        aggregate,
+        has_samples,
+        has_latency,
+    ));
+    values
+}
+
+fn spe_hierarchy_theory_latency_cycles(name: &str) -> Option<u32> {
+    let parent = name.split('.').next().unwrap_or(name);
+    match parent {
+        "load_l1" => Some(4),
+        "load_l2" => Some(10),
+        "load_l3" => Some(60),
+        _ if parent.starts_with("store") => Some(3),
+        _ => None,
+    }
+}
+
+fn spe_hierarchy_theory_metric_values(
+    name: &str,
+    aggregate: &SpeCategoryAggregate,
+    has_samples: bool,
+    has_latency: bool,
+) -> BTreeMap<String, MetricValue> {
+    let mut values = BTreeMap::new();
+    let Some(threshold) = spe_hierarchy_theory_latency_cycles(name) else {
+        return values;
+    };
+    let missing_or_number = |value: f64| {
+        if has_samples && !has_latency {
+            MetricValue::Missing("SPE latency field unavailable".to_string())
+        } else {
+            MetricValue::Number(value)
+        }
+    };
+    let above_samples = aggregate
+        .latency_cycles_samples
+        .iter()
+        .filter(|latency| **latency > threshold)
+        .count() as f64;
+    let above_latency_cycles = aggregate
+        .latency_cycles_samples
+        .iter()
+        .filter(|latency| **latency > threshold)
+        .map(|latency| u64::from(*latency))
+        .sum::<u64>();
+    values.insert(
+        format!("{name}.over_theory_sample_pct"),
+        missing_or_number(percent(
+            above_samples,
+            aggregate.latency_sample_count as f64,
+        )),
+    );
+    values.insert(
+        format!("{name}.over_theory_est_time_pct"),
+        missing_or_number(percent(
+            above_latency_cycles as f64,
+            aggregate.latency_cycles_sum as f64,
+        )),
+    );
     values
 }
 
@@ -1937,6 +1999,10 @@ fn make_instruction_class_summary_values(
         let has_latency = latency_sample_count > 0;
 
         values.insert(
+            format!("instruction_class.{name}.sample_count"),
+            MetricValue::Number(sample_count as f64),
+        );
+        values.insert(
             format!("instruction_class.{name}.sample_pct"),
             MetricValue::Number(sample_pct),
         );
@@ -1986,6 +2052,10 @@ fn make_instruction_class_distribution_values(
         let has_samples = sample_count > 0;
         let has_latency = latency_sample_count > 0;
 
+        values.insert(
+            format!("instruction_class.{name}.sample_count"),
+            MetricValue::Number(sample_count as f64),
+        );
         values.insert(
             format!("instruction_class.{name}.sample_pct"),
             MetricValue::Number(sample_pct),
@@ -2037,6 +2107,10 @@ fn make_load_instruction_kind_summary_values(
         let has_latency = latency_sample_count > 0;
 
         values.insert(
+            format!("load_instruction.{name}.sample_count"),
+            MetricValue::Number(sample_count as f64),
+        );
+        values.insert(
             format!("load_instruction.{name}.sample_pct"),
             MetricValue::Number(sample_pct),
         );
@@ -2086,6 +2160,10 @@ fn make_load_instruction_kind_distribution_values(
         let has_samples = sample_count > 0;
         let has_latency = latency_sample_count > 0;
 
+        values.insert(
+            format!("load_instruction.{name}.sample_count"),
+            MetricValue::Number(sample_count as f64),
+        );
         values.insert(
             format!("load_instruction.{name}.sample_pct"),
             MetricValue::Number(sample_pct),
@@ -2692,6 +2770,10 @@ fn make_spe_category_values(
         let has_samples = sample_count > 0;
         let has_latency = latency_sample_count > 0;
 
+        values.insert(
+            format!("{name}.sample_count"),
+            MetricValue::Number(sample_count as f64),
+        );
         values.insert(
             format!("{name}.sample_pct"),
             MetricValue::Number(sample_pct),
@@ -3663,6 +3745,51 @@ mod tests {
     }
 
     #[test]
+    fn spe_hierarchy_theory_threshold_metrics_only_apply_to_configured_categories() {
+        let mut load_l1 = spe_hierarchy_parent(&[3, 4, 5, 10]);
+        spe_hierarchy_child(&mut load_l1, InstructionClass::ScalarLoad, &[4, 8]);
+        let store_unknown = spe_hierarchy_parent(&[3, 4]);
+        let branch_unknown = spe_hierarchy_parent(&[100]);
+
+        let values = make_spe_hierarchy_cpu_values_from_cpu_parents(&BTreeMap::from([(
+            4,
+            BTreeMap::from([
+                (SpeReportCategory::LoadL1, load_l1),
+                (SpeReportCategory::StoreUnknown, store_unknown),
+                (SpeReportCategory::BranchUnknown, branch_unknown),
+            ]),
+        )]));
+        let cpu_values = values.get(&4).expect("cpu 4 hierarchy values");
+
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.over_theory_sample_pct")),
+            Some(50.0)
+        );
+        assert!(matches!(
+            metric_value_number(cpu_values.get("load_l1.over_theory_est_time_pct")),
+            Some(value) if (value - (15.0 / 22.0 * 100.0)).abs() < 0.000001
+        ));
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.scalar_load.over_theory_sample_pct")),
+            Some(50.0)
+        );
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.scalar_load.over_theory_est_time_pct")),
+            Some(8.0 / 12.0 * 100.0)
+        );
+        assert_eq!(
+            metric_value_number(cpu_values.get("store_unknown.over_theory_sample_pct")),
+            Some(50.0)
+        );
+        assert_eq!(
+            metric_value_number(cpu_values.get("store_unknown.over_theory_est_time_pct")),
+            Some(4.0 / 7.0 * 100.0)
+        );
+        assert!(!cpu_values.contains_key("branch_unknown.over_theory_sample_pct"));
+        assert!(!cpu_values.contains_key("branch_unknown.over_theory_est_time_pct"));
+    }
+
+    #[test]
     fn spe_hierarchy_histograms_include_parent_and_child_keys() {
         let mut compute_unknown = spe_hierarchy_parent(&[10, 10, 20, 60]);
         spe_hierarchy_child(
@@ -3788,6 +3915,14 @@ mod tests {
         let values = make_spe_category_values(&by_category, 4, 100, None, 100.0);
 
         assert!(matches!(
+            values.get("branch_unknown.sample_count"),
+            Some(MetricValue::Number(value)) if (*value - 3.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_dram.sample_count"),
+            Some(MetricValue::Number(value)) if (*value - 1.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
             values.get("branch_unknown.est_time_pct"),
             Some(MetricValue::Missing(reason)) if reason.contains("PMU cpu_cycles")
         ));
@@ -3826,6 +3961,10 @@ mod tests {
         let values =
             make_instruction_class_summary_values(&by_class, 4, 120, Some(10_000.0), 100.0);
 
+        assert_eq!(
+            metric_value_number(values.get("instruction_class.compute_fp_simd.sample_count")),
+            Some(2.0)
+        );
         assert_eq!(
             metric_value_number(values.get("instruction_class.compute_fp_simd.sample_pct")),
             Some(50.0)

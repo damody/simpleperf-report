@@ -527,7 +527,8 @@ fn is_spe_metric_sort_key(key: &str) -> bool {
     let Some((category, metric)) = key.split_once('.') else {
         return false;
     };
-    SPE_CATEGORY_NAMES.contains(&category) && SPE_CATEGORY_METRICS.contains(&metric)
+    SPE_CATEGORY_NAMES.contains(&category)
+        && (metric == "sample_count" || SPE_CATEGORY_METRICS.contains(&metric))
 }
 
 fn is_instruction_metric_sort_key(key: &str) -> bool {
@@ -537,7 +538,8 @@ fn is_instruction_metric_sort_key(key: &str) -> bool {
     let Some((class, metric)) = rest.split_once('.') else {
         return false;
     };
-    INSTRUCTION_CLASS_NAMES.contains(&class) && INSTRUCTION_CLASS_METRICS.contains(&metric)
+    INSTRUCTION_CLASS_NAMES.contains(&class)
+        && (metric == "sample_count" || INSTRUCTION_CLASS_METRICS.contains(&metric))
 }
 
 fn is_load_instruction_metric_sort_key(key: &str) -> bool {
@@ -547,7 +549,8 @@ fn is_load_instruction_metric_sort_key(key: &str) -> bool {
     let Some((kind, metric)) = rest.split_once('.') else {
         return false;
     };
-    LOAD_INSTRUCTION_KIND_NAMES.contains(&kind) && LOAD_INSTRUCTION_METRICS.contains(&metric)
+    LOAD_INSTRUCTION_KIND_NAMES.contains(&kind)
+        && (metric == "sample_count" || LOAD_INSTRUCTION_METRICS.contains(&metric))
 }
 
 fn metric_order_by(

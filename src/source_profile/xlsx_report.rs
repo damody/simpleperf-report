@@ -375,13 +375,15 @@ fn write_instruction_class_sheet(
         "p99_latency_cycles",
         ">p95 est_time%",
         ">avg est_time%",
+        ">p95 all est_time%",
+        ">avg all est_time%",
     ];
     format_basic_sheet(
         worksheet,
         1,
         (headers.len() - 1) as u16,
         &[
-            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0, 12.0,
+            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0, 12.0, 16.0, 16.0,
         ],
     )?;
     for (col, header) in headers.iter().enumerate() {
@@ -399,6 +401,8 @@ fn write_instruction_class_sheet(
         "p99_latency_cycles",
         "over_p95_est_time_pct",
         "over_avg_est_time_pct",
+        "over_p95_all_est_time_pct",
+        "over_avg_all_est_time_pct",
     ];
     let mut row = 1_u32;
     for (cpu, values_by_key) in &model.instruction_cpu_class_values {
@@ -446,13 +450,15 @@ fn write_load_instruction_sheet(
         "p99_latency_cycles",
         ">p95 est_time%",
         ">avg est_time%",
+        ">p95 all est_time%",
+        ">avg all est_time%",
     ];
     format_basic_sheet(
         worksheet,
         1,
         (headers.len() - 1) as u16,
         &[
-            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0, 12.0,
+            8.0, 28.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 12.0, 12.0, 16.0, 16.0,
         ],
     )?;
     for (col, header) in headers.iter().enumerate() {
@@ -470,6 +476,8 @@ fn write_load_instruction_sheet(
         "p99_latency_cycles",
         "over_p95_est_time_pct",
         "over_avg_est_time_pct",
+        "over_p95_all_est_time_pct",
+        "over_avg_all_est_time_pct",
     ];
     let mut row = 1_u32;
     for (cpu, values_by_key) in &model.load_cpu_kind_values {
@@ -519,6 +527,8 @@ fn write_spe_breakdown_sheet(
         "p99_latency_cycles",
         ">p95 est_time%",
         ">avg est_time%",
+        ">p95 all est_time%",
+        ">avg all est_time%",
     ];
     format_basic_sheet(
         worksheet,
@@ -526,6 +536,7 @@ fn write_spe_breakdown_sheet(
         (headers.len() - 1) as u16,
         &[
             8.0, 24.0, 24.0, 10.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 14.0, 14.0,
+            16.0, 16.0,
         ],
     )?;
     for (col, header) in headers.iter().enumerate() {
@@ -543,6 +554,8 @@ fn write_spe_breakdown_sheet(
         "p99_latency_cycles",
         "over_p95_est_time_pct",
         "over_avg_est_time_pct",
+        "over_p95_all_est_time_pct",
+        "over_avg_all_est_time_pct",
     ];
     let mut row = 1_u32;
     for (cpu, values_by_key) in &model.spe_hierarchical_cpu_values {

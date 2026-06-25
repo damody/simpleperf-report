@@ -130,6 +130,7 @@ pub fn write_html_summary_from_model(
     .spe-histogram-row {{ display: grid; grid-template-columns: 160px minmax(120px, 1fr) 64px; align-items: center; gap: 8px; margin: 4px 0; }}
     .spe-histogram-label {{ font-family: Consolas, monospace; font-size: 12px; }}
     .spe-histogram-bar-track {{ height: 14px; background: #f1f5f9; border: 1px solid #d0d7de; }}
+    .spe-histogram-bar-track.empty {{ background: #fff; }}
     .spe-histogram-bar {{ height: 100%; background: #2563eb; min-width: 2px; }}
     .spe-histogram-count {{ text-align: right; font-variant-numeric: tabular-nums; }}
     details.report-section {{ margin-top: 24px; }}
@@ -165,7 +166,7 @@ pub fn write_html_summary_from_model(
   <summary>SPE Hierarchical Breakdown</summary>
   <p>SPE parent rows are CPU-relative. Child rows are relative to their parent category.</p>
   <table class="spe-summary-table">
-    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th></tr>
+    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th><th>&gt;p95 all est_time%</th><th>&gt;avg all est_time%</th></tr>
     {spe_hierarchy_summary_rows}
   </table>
   <div id="speHierarchyHistogram" class="spe-histogram-panel">Select a SPE breakdown row to view latency histogram.</div>
@@ -369,10 +370,12 @@ pub fn write_html_summary_from_model(
       const maxCount = Math.max(...histogram.bins.map(bin => Number(bin.count) || 0), 1);
       const rows = histogram.bins.map(bin => {{
         const count = Number(bin.count) || 0;
-        const width = Math.max(2, count / maxCount * 100);
+        const width = count > 0 ? Math.max(2, count / maxCount * 100) : 0;
         const start = formatMetric(bin.start_latency_cycles);
         const end = formatMetric(bin.end_latency_cycles);
-        return `<div class="spe-histogram-row"><div class="spe-histogram-label">${{start}}-${{end}}</div><div class="spe-histogram-bar-track"><div class="spe-histogram-bar" style="width:${{width}}%"></div></div><div class="spe-histogram-count">${{count}}</div></div>`;
+        const trackClass = count === 0 ? "spe-histogram-bar-track empty" : "spe-histogram-bar-track";
+        const bar = count > 0 ? `<div class="spe-histogram-bar" style="width:${{width}}%"></div>` : "";
+        return `<div class="spe-histogram-row"><div class="spe-histogram-label">${{start}}-${{end}}</div><div class="${{trackClass}}">${{bar}}</div><div class="spe-histogram-count">${{count}}</div></div>`;
       }}).join("");
       panel.innerHTML = `<div class="spe-histogram-title">${{title}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})</div>${{rows}}`;
     }}
@@ -831,9 +834,11 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         ("p99_latency_cycles", false),
         ("over_p95_est_time_pct", false),
         ("over_avg_est_time_pct", false),
+        ("over_p95_all_est_time_pct", false),
+        ("over_avg_all_est_time_pct", false),
     ];
     if !spe_available {
-        return "<tr><td colspan=\"12\">SPE samples unavailable</td></tr>".to_string();
+        return "<tr><td colspan=\"14\">SPE samples unavailable</td></tr>".to_string();
     }
 
     let rows = model
@@ -908,7 +913,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
-        return "<tr><td colspan=\"12\">No SPE hierarchy samples</td></tr>".to_string();
+        return "<tr><td colspan=\"14\">No SPE hierarchy samples</td></tr>".to_string();
     }
     rows.join("\n")
 }
@@ -1310,10 +1315,16 @@ fn instruction_class_metric_formula(key: &str) -> &'static str {
             "nearest-rank p99 SPE latency cycles in this instruction class"
         }
         Some("over_p95_est_time_pct") => {
-            "estimated time from SPE latency cycles greater than this instruction class p95 / total time"
+            "estimated time from SPE latency cycles greater than this instruction class p95 / this instruction class estimated time"
         }
         Some("over_avg_est_time_pct") => {
-            "estimated time from SPE latency cycles greater than this instruction class average / total time"
+            "estimated time from SPE latency cycles greater than this instruction class average / this instruction class estimated time"
+        }
+        Some("over_p95_all_est_time_pct") => {
+            "estimated time from SPE latency cycles greater than this instruction class p95 / total estimated time"
+        }
+        Some("over_avg_all_est_time_pct") => {
+            "estimated time from SPE latency cycles greater than this instruction class average / total estimated time"
         }
         _ => "instruction-class SPE metric",
     }
@@ -1343,10 +1354,16 @@ fn load_instruction_metric_formula(key: &str) -> &'static str {
             "nearest-rank p99 SPE latency cycles in this load instruction kind"
         }
         Some("over_p95_est_time_pct") => {
-            "estimated time from SPE latency cycles greater than this load instruction kind p95 / total time"
+            "estimated time from SPE latency cycles greater than this load instruction kind p95 / this load instruction kind estimated time"
         }
         Some("over_avg_est_time_pct") => {
-            "estimated time from SPE latency cycles greater than this load instruction kind average / total time"
+            "estimated time from SPE latency cycles greater than this load instruction kind average / this load instruction kind estimated time"
+        }
+        Some("over_p95_all_est_time_pct") => {
+            "estimated time from SPE latency cycles greater than this load instruction kind p95 / total estimated time"
+        }
+        Some("over_avg_all_est_time_pct") => {
+            "estimated time from SPE latency cycles greater than this load instruction kind average / total estimated time"
         }
         _ => "load-instruction SPE metric",
     }
@@ -1370,10 +1387,16 @@ fn spe_category_metric_formula(key: &str) -> &'static str {
         Some("p95_latency_cycles") => "nearest-rank p95 SPE latency cycles in this category",
         Some("p99_latency_cycles") => "nearest-rank p99 SPE latency cycles in this category",
         Some("over_p95_est_time_pct") => {
-            "estimated time from SPE latency cycles greater than this category p95 / total time"
+            "estimated time from SPE latency cycles greater than this category p95 / this category estimated time"
         }
         Some("over_avg_est_time_pct") => {
-            "estimated time from SPE latency cycles greater than this category average / total time"
+            "estimated time from SPE latency cycles greater than this category average / this category estimated time"
+        }
+        Some("over_p95_all_est_time_pct") => {
+            "estimated time from SPE latency cycles greater than this category p95 / total estimated time"
+        }
+        Some("over_avg_all_est_time_pct") => {
+            "estimated time from SPE latency cycles greater than this category average / total estimated time"
         }
         _ => "SPE category metric",
     }
@@ -1399,10 +1422,16 @@ fn spe_category_metric_meaning(key: &str) -> &'static str {
         Some("p95_latency_cycles") => "此類 SPE sample latency cycles 的 nearest-rank p95。",
         Some("p99_latency_cycles") => "此類 SPE sample latency cycles 的 nearest-rank p99。",
         Some("over_p95_est_time_pct") => {
-            "此類 SPE sample 中 latency cycles 大於該類 p95 的估算時間佔全部時間比例。"
+            "此類 SPE sample 中 latency cycles 大於該類 p95 的估算時間佔此類自身估算時間比例。"
         }
         Some("over_avg_est_time_pct") => {
-            "此類 SPE sample 中 latency cycles 大於該類平均值的估算時間佔全部時間比例。"
+            "此類 SPE sample 中 latency cycles 大於該類平均值的估算時間佔此類自身估算時間比例。"
+        }
+        Some("over_p95_all_est_time_pct") => {
+            "此類 SPE sample 中 latency cycles 大於該類 p95 的估算時間佔全部時間比例，用來比較哪個長尾最花總時間。"
+        }
+        Some("over_avg_all_est_time_pct") => {
+            "此類 SPE sample 中 latency cycles 大於該類平均值的估算時間佔全部時間比例，用來比較哪個長尾最花總時間。"
         }
         _ => "Arm SPE category decoded metric。",
     }
@@ -1619,16 +1648,18 @@ mod tests {
         assert!(spe_summary_pos < column_help_pos);
         assert!(column_help_pos < source_lines_pos);
         assert!(html.contains("<table class=\"spe-summary-table\">"));
-        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th>"));
+        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th><th>&gt;p95 all est_time%</th><th>&gt;avg all est_time%</th>"));
         assert!(html.contains("id=\"speHierarchyHistogram\""));
         assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS = "));
         assert!(html.contains("function renderSpeHierarchyHistogram"));
+        assert!(html.contains("count > 0 ? Math.max(2, count / maxCount * 100) : 0"));
+        assert!(html.contains("spe-histogram-bar-track empty"));
         assert!(!html.contains("<summary>SPE Category Summary</summary>"));
         assert!(!html.contains("<summary>Instruction Class Summary</summary>"));
         assert!(!html.contains("<summary>Load Instruction Summary</summary>"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
-        assert!(html.contains("<tr><td colspan=\"12\">SPE samples unavailable</td></tr>"));
+        assert!(html.contains("<tr><td colspan=\"14\">SPE samples unavailable</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
         assert!(html
             .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
@@ -1886,6 +1917,14 @@ mod tests {
                         MetricValue::Number(40.0),
                     ),
                     (
+                        "load_l1.over_p95_all_est_time_pct".to_string(),
+                        MetricValue::Number(20.0),
+                    ),
+                    (
+                        "load_l1.over_avg_all_est_time_pct".to_string(),
+                        MetricValue::Number(35.0),
+                    ),
+                    (
                         "load_l1.vector_load.sample_pct".to_string(),
                         MetricValue::Number(60.0),
                     ),
@@ -1924,6 +1963,14 @@ mod tests {
                     (
                         "load_l1.vector_load.over_avg_est_time_pct".to_string(),
                         MetricValue::Number(50.0),
+                    ),
+                    (
+                        "load_l1.vector_load.over_p95_all_est_time_pct".to_string(),
+                        MetricValue::Number(25.0),
+                    ),
+                    (
+                        "load_l1.vector_load.over_avg_all_est_time_pct".to_string(),
+                        MetricValue::Number(45.0),
                     ),
                 ]),
             )]),

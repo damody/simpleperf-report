@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
-use object::{Object, ObjectSection, SectionKind};
+use object::{Object, ObjectSection, SectionFlags, SectionKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedInstruction {
@@ -99,26 +99,161 @@ pub fn build_sparse_instruction_index_from_elf(elf_path: &Path) -> Result<Sparse
     };
     let object = object::File::parse(&*mmap)
         .with_context(|| format!("Failed to parse ELF '{}'", elf_path.display()))?;
+    let elf_section_ranges = elf_section_header_ranges(&mmap);
+    let file_len = mmap.len() as u64;
     let mut sections = Vec::new();
     for section in object.sections() {
-        if section.kind() != SectionKind::Text {
+        if !section_is_executable_text(&section) {
             continue;
         }
-        let Some((file_offset, file_size)) = section.file_range() else {
+        let section_size = section.size();
+        let file_range = section
+            .file_range()
+            .filter(|(_, size)| *size >= 4)
+            .or_else(|| {
+                elf_section_ranges
+                    .as_ref()
+                    .and_then(|ranges| {
+                        ranges
+                            .iter()
+                            .find(|range| {
+                                range.address == section.address() && range.size == section_size
+                            })
+                            .or_else(|| {
+                                ranges
+                                    .iter()
+                                    .find(|range| range.address == section.address())
+                            })
+                    })
+                    .map(|range| (range.file_offset, range.size))
+            });
+        let Some((file_offset, file_size)) = file_range else {
             continue;
         };
-        if file_size < 4 {
-            continue;
-        }
-        sections.push(InstructionSection {
-            address: section.address(),
-            size: section.size().min(file_size),
+        push_clipped_instruction_section(
+            &mut sections,
+            section.address(),
+            section_size,
             file_offset,
             file_size,
-        });
+            file_len,
+        );
+    }
+    if let Some(ranges) = &elf_section_ranges {
+        for range in ranges {
+            if sections.iter().any(|section| {
+                section.address == range.address && section.file_offset == range.file_offset
+            }) {
+                continue;
+            }
+            push_clipped_instruction_section(
+                &mut sections,
+                range.address,
+                range.size,
+                range.file_offset,
+                range.size,
+                file_len,
+            );
+        }
     }
     sections.sort_by_key(|section| section.address);
     Ok(SparseInstructionIndex { mmap, sections })
+}
+
+fn section_is_executable_text(section: &object::Section<'_, '_>) -> bool {
+    section.kind() == SectionKind::Text
+        || matches!(
+            section.flags(),
+            SectionFlags::Elf { sh_flags } if sh_flags & 0x4 != 0
+        )
+}
+
+fn push_clipped_instruction_section(
+    sections: &mut Vec<InstructionSection>,
+    address: u64,
+    section_size: u64,
+    file_offset: u64,
+    file_size: u64,
+    file_len: u64,
+) {
+    let available_file_size = file_len
+        .checked_sub(file_offset)
+        .map(|available| available.min(file_size).min(section_size))
+        .unwrap_or(0);
+    if available_file_size < 4 {
+        return;
+    }
+    sections.push(InstructionSection {
+        address,
+        size: available_file_size,
+        file_offset,
+        file_size: available_file_size,
+    });
+}
+
+#[derive(Debug, Clone)]
+struct ElfSectionHeaderRange {
+    address: u64,
+    size: u64,
+    file_offset: u64,
+}
+
+fn elf_section_header_ranges(bytes: &[u8]) -> Option<Vec<ElfSectionHeaderRange>> {
+    if bytes.len() < 64 || bytes.get(0..4)? != b"\x7fELF" || bytes.get(4).copied()? != 2 {
+        return None;
+    }
+    let little_endian = bytes.get(5).copied()? == 1;
+    let read_u16 = |offset: usize| -> Option<u16> {
+        let data = bytes.get(offset..offset + 2)?;
+        Some(if little_endian {
+            u16::from_le_bytes(data.try_into().ok()?)
+        } else {
+            u16::from_be_bytes(data.try_into().ok()?)
+        })
+    };
+    let read_u32 = |offset: usize| -> Option<u32> {
+        let data = bytes.get(offset..offset + 4)?;
+        Some(if little_endian {
+            u32::from_le_bytes(data.try_into().ok()?)
+        } else {
+            u32::from_be_bytes(data.try_into().ok()?)
+        })
+    };
+    let read_u64 = |offset: usize| -> Option<u64> {
+        let data = bytes.get(offset..offset + 8)?;
+        Some(if little_endian {
+            u64::from_le_bytes(data.try_into().ok()?)
+        } else {
+            u64::from_be_bytes(data.try_into().ok()?)
+        })
+    };
+
+    let section_table_offset = read_u64(40)? as usize;
+    let section_entry_size = read_u16(58)? as usize;
+    let section_count = read_u16(60)? as usize;
+    if section_table_offset == 0 || section_entry_size < 64 || section_count == 0 {
+        return None;
+    }
+
+    let mut ranges = Vec::new();
+    for index in 0..section_count {
+        let offset = section_table_offset.checked_add(index.checked_mul(section_entry_size)?)?;
+        let section_type = read_u32(offset + 4)?;
+        let flags = read_u64(offset + 8)?;
+        let address = read_u64(offset + 16)?;
+        let file_offset = read_u64(offset + 24)?;
+        let size = read_u64(offset + 32)?;
+        let is_nobits = section_type == 8;
+        let is_executable = flags & 0x4 != 0;
+        if is_executable && !is_nobits && size >= 4 {
+            ranges.push(ElfSectionHeaderRange {
+                address,
+                size,
+                file_offset,
+            });
+        }
+    }
+    Some(ranges)
 }
 
 pub fn build_instruction_index_from_elf(
@@ -178,12 +313,17 @@ fn classify_aarch64_instruction_word(
     }
     if is_aarch64_load_store(instruction) {
         let is_vector = instruction & (1 << 26) != 0;
-        let is_exclusive = (instruction & 0x3f00_0000) == 0x0800_0000;
+        let is_atomic = is_aarch64_atomic_or_exclusive(instruction);
+        let is_acquire_release = is_aarch64_acquire_release(instruction);
         let is_pair = (instruction & 0x3a00_0000) == 0x2800_0000;
         let is_literal = (instruction & 0x1b00_0000) == 0x1800_0000;
         let is_load = is_literal || instruction & (1 << 22) != 0;
+        if is_acquire_release {
+            let kind = is_load.then_some(LoadInstructionKind::Acquire);
+            return (InstructionClass::AcquireRelease, kind);
+        }
         if is_load {
-            let kind = if is_exclusive {
+            let kind = if is_atomic {
                 LoadInstructionKind::AtomicExclusive
             } else if is_pair && is_vector {
                 LoadInstructionKind::VectorPair
@@ -198,7 +338,7 @@ fn classify_aarch64_instruction_word(
             } else {
                 LoadInstructionKind::ScalarSingle
             };
-            let class = if is_exclusive {
+            let class = if is_atomic {
                 InstructionClass::Atomic
             } else if is_vector {
                 InstructionClass::VectorLoad
@@ -207,7 +347,7 @@ fn classify_aarch64_instruction_word(
             };
             return (class, Some(kind));
         }
-        let class = if is_exclusive {
+        let class = if is_atomic {
             InstructionClass::Atomic
         } else if is_vector {
             InstructionClass::VectorStore
@@ -244,7 +384,17 @@ fn is_aarch64_system_instruction(instruction: u32) -> bool {
 }
 
 fn is_aarch64_load_store(instruction: u32) -> bool {
-    ((instruction >> 25) & 0x7) == 0b100
+    matches!((instruction >> 25) & 0x7, 0b100 | 0b110)
+}
+
+fn is_aarch64_atomic_or_exclusive(instruction: u32) -> bool {
+    (instruction & 0x3f00_0000) == 0x0800_0000
+}
+
+fn is_aarch64_acquire_release(instruction: u32) -> bool {
+    is_aarch64_atomic_or_exclusive(instruction)
+        && instruction & (1 << 23) != 0
+        && instruction & (1 << 15) != 0
 }
 
 fn is_aarch64_prefetch(instruction: u32) -> bool {
@@ -688,6 +838,46 @@ mod tests {
     }
 
     #[test]
+    fn classifies_aarch64_load_store_words() {
+        assert_eq!(
+            classify_aarch64_instruction_word(0xf940_0020),
+            (
+                InstructionClass::ScalarLoad,
+                Some(LoadInstructionKind::ScalarSingle)
+            )
+        );
+        assert_eq!(
+            classify_aarch64_instruction_word(0x3dc0_0020),
+            (
+                InstructionClass::VectorLoad,
+                Some(LoadInstructionKind::VectorSingle)
+            )
+        );
+        assert_eq!(
+            classify_aarch64_instruction_word(0xc8df_fc20),
+            (
+                InstructionClass::AcquireRelease,
+                Some(LoadInstructionKind::Acquire)
+            )
+        );
+        assert_eq!(
+            classify_aarch64_instruction_word(0xc89f_fc20),
+            (InstructionClass::AcquireRelease, None)
+        );
+        assert_eq!(
+            classify_aarch64_instruction_word(0xc85f_7c20),
+            (
+                InstructionClass::Atomic,
+                Some(LoadInstructionKind::AtomicExclusive)
+            )
+        );
+        assert_eq!(
+            classify_aarch64_instruction_word(0xc800_7c20),
+            (InstructionClass::Atomic, None)
+        );
+    }
+
+    #[test]
     fn classifies_detailed_load_instruction_kinds() {
         assert_eq!(
             classify_load_instruction("ldr", "x0, [x1]"),
@@ -772,6 +962,28 @@ mod tests {
     }
 
     #[test]
+    fn parses_executable_elf_section_header_ranges() {
+        let mut bytes = vec![0u8; 0x200];
+        bytes[0..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        write_u64_le(&mut bytes, 40, 0x80);
+        write_u16_le(&mut bytes, 58, 64);
+        write_u16_le(&mut bytes, 60, 4);
+
+        write_section_header(&mut bytes, 0x80 + 64, 1, 0x4, 0x1000, 0x100, 0x20);
+        write_section_header(&mut bytes, 0x80 + 128, 1, 0x0, 0x2000, 0x140, 0x20);
+        write_section_header(&mut bytes, 0x80 + 192, 8, 0x4, 0x3000, 0x180, 0x20);
+
+        let ranges = elf_section_header_ranges(&bytes).unwrap();
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].address, 0x1000);
+        assert_eq!(ranges[0].file_offset, 0x100);
+        assert_eq!(ranges[0].size, 0x20);
+    }
+
+    #[test]
     fn finds_android_ndk_objdump_from_sdk_root() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target/source_profile_tests/fake_android_sdk");
@@ -784,5 +996,33 @@ mod tests {
             find_objdump_in_android_sdk_roots([root.as_path()]),
             Some(objdump)
         );
+    }
+
+    fn write_section_header(
+        bytes: &mut [u8],
+        offset: usize,
+        section_type: u32,
+        flags: u64,
+        address: u64,
+        file_offset: u64,
+        size: u64,
+    ) {
+        write_u32_le(bytes, offset + 4, section_type);
+        write_u64_le(bytes, offset + 8, flags);
+        write_u64_le(bytes, offset + 16, address);
+        write_u64_le(bytes, offset + 24, file_offset);
+        write_u64_le(bytes, offset + 32, size);
+    }
+
+    fn write_u16_le(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u64_le(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
 }

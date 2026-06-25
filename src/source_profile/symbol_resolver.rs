@@ -147,10 +147,7 @@ struct CandidateInfo {
 
 fn match_one_module(module: &BuildIdRecord, candidates: &[CandidateInfo]) -> ElfMatch {
     if let Some(expected_build_id) = module.build_id.as_deref() {
-        if let Some(candidate) = candidates
-            .iter()
-            .find(|candidate| candidate.build_id.as_deref() == Some(expected_build_id))
-        {
+        if let Some(candidate) = best_build_id_candidate(module, candidates, expected_build_id) {
             return make_match(
                 module,
                 candidate,
@@ -314,6 +311,38 @@ mod tests {
     }
 
     #[test]
+    fn build_id_match_prefers_runtime_file_size() {
+        let module = BuildIdRecord {
+            module_id: "libunity.so".to_string(),
+            runtime_path: "/data/app/libunity.so".to_string(),
+            build_id: Some("abcd".to_string()),
+            soname: Some("libunity.so".to_string()),
+            file_size: Some(29_502_856),
+            mtime_utc: None,
+            debug_elf_candidate_path: None,
+            match_status: "matched".to_string(),
+        };
+        let smaller = CandidateInfo {
+            path: PathBuf::from("D:/NMZ/libunity.so"),
+            build_id: Some("abcd".to_string()),
+            file_size: Some(13_652_248),
+            has_dwarf_debug_info: true,
+        };
+        let runtime_sized = CandidateInfo {
+            path: PathBuf::from("D:/shared_trace/libunity.so"),
+            build_id: Some("abcd".to_string()),
+            file_size: Some(29_502_856),
+            has_dwarf_debug_info: false,
+        };
+
+        let candidates = [smaller, runtime_sized];
+        let candidate = best_build_id_candidate(&module, &candidates, "abcd")
+            .expect("expected build-id candidate");
+
+        assert_eq!(candidate.path, PathBuf::from("D:/shared_trace/libunity.so"));
+    }
+
+    #[test]
     fn discover_debug_elfs_skips_unparseable_elf_candidates() {
         let path = std::env::temp_dir().join(format!(
             "mprofiler-discover-unparseable-elf-{}.so",
@@ -326,4 +355,21 @@ mod tests {
         assert!(candidates.is_empty());
         let _ = fs::remove_file(path);
     }
+}
+
+fn best_build_id_candidate<'a>(
+    module: &BuildIdRecord,
+    candidates: &'a [CandidateInfo],
+    expected_build_id: &str,
+) -> Option<&'a CandidateInfo> {
+    candidates
+        .iter()
+        .filter(|candidate| candidate.build_id.as_deref() == Some(expected_build_id))
+        .max_by_key(|candidate| {
+            (
+                module.file_size.is_some() && candidate.file_size == module.file_size,
+                candidate.has_dwarf_debug_info,
+                candidate.file_size.unwrap_or(0),
+            )
+        })
 }

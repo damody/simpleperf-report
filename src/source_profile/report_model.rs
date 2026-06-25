@@ -124,6 +124,8 @@ pub const SPE_CATEGORY_METRICS: &[&str] = &[
     "p99_latency_cycles",
     "over_p95_est_time_pct",
     "over_avg_est_time_pct",
+    "over_p95_all_est_time_pct",
+    "over_avg_all_est_time_pct",
 ];
 
 pub const INSTRUCTION_CLASS_NAMES: &[&str] = &[
@@ -829,7 +831,7 @@ impl InstructionIndexCache {
     ) -> (InstructionClass, Option<LoadInstructionKind>) {
         self.lookup_instruction(bundle, elf_matches, mapping_id, runtime_pc, warnings)
             .map(|instruction| (instruction.class, instruction.load_kind))
-            .unwrap_or((InstructionClass::MissingInstruction, None))
+            .unwrap_or((InstructionClass::UnknownInstruction, None))
     }
 
     fn classify(
@@ -842,7 +844,7 @@ impl InstructionIndexCache {
     ) -> InstructionClass {
         self.lookup_instruction(bundle, elf_matches, mapping_id, runtime_pc, warnings)
             .map(|instruction| instruction.class)
-            .unwrap_or(InstructionClass::MissingInstruction)
+            .unwrap_or(InstructionClass::UnknownInstruction)
     }
 
     fn load_kind(
@@ -1519,6 +1521,7 @@ fn make_spe_hierarchy_cpu_values_from_cpu_parents(
                     &parent.aggregate,
                     total_parent_samples,
                     total_parent_latency_cycles,
+                    total_parent_latency_cycles,
                 ));
 
                 for (class, child) in &parent.children {
@@ -1528,6 +1531,7 @@ fn make_spe_hierarchy_cpu_values_from_cpu_parents(
                         child,
                         parent.aggregate.sample_count,
                         parent.aggregate.latency_cycles_sum,
+                        total_parent_latency_cycles,
                     ));
                 }
             }
@@ -1542,6 +1546,7 @@ fn make_spe_hierarchy_metric_values(
     aggregate: &SpeCategoryAggregate,
     total_samples: u64,
     total_latency_cycles: u64,
+    all_latency_cycles: u64,
 ) -> BTreeMap<String, MetricValue> {
     let mut values = BTreeMap::new();
     let has_samples = aggregate.sample_count > 0;
@@ -1575,7 +1580,7 @@ fn make_spe_hierarchy_metric_values(
     values.extend(spe_category_latency_metric_values(
         name,
         Some(aggregate),
-        Some(total_latency_cycles as f64),
+        Some(all_latency_cycles as f64),
         1.0,
     ));
     values
@@ -1863,12 +1868,32 @@ fn spe_category_latency_metric_values(
             has_samples,
             has_latency,
             aggregate,
+            aggregate.map(|value| value.latency_cycles_sum as f64),
+            1.0,
+        ),
+    );
+    values.insert(
+        format!("{name}.over_avg_est_time_pct"),
+        tail_avg_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            aggregate.map(|value| value.latency_cycles_sum as f64),
+            1.0,
+        ),
+    );
+    values.insert(
+        format!("{name}.over_p95_all_est_time_pct"),
+        tail_p95_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
             est_time_denominator_cycles,
             spe_effective_period,
         ),
     );
     values.insert(
-        format!("{name}.over_avg_est_time_pct"),
+        format!("{name}.over_avg_all_est_time_pct"),
         tail_avg_est_time_value(
             has_samples,
             has_latency,
@@ -2131,12 +2156,32 @@ fn instruction_class_latency_metric_values(
             has_samples,
             has_latency,
             aggregate,
+            aggregate.map(|value| value.latency_cycles_sum as f64),
+            1.0,
+        ),
+    );
+    values.insert(
+        format!("instruction_class.{name}.over_avg_est_time_pct"),
+        tail_avg_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            aggregate.map(|value| value.latency_cycles_sum as f64),
+            1.0,
+        ),
+    );
+    values.insert(
+        format!("instruction_class.{name}.over_p95_all_est_time_pct"),
+        tail_p95_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
             est_time_denominator_cycles,
             spe_effective_period,
         ),
     );
     values.insert(
-        format!("instruction_class.{name}.over_avg_est_time_pct"),
+        format!("instruction_class.{name}.over_avg_all_est_time_pct"),
         tail_avg_est_time_value(
             has_samples,
             has_latency,
@@ -2199,12 +2244,32 @@ fn load_instruction_latency_metric_values(
             has_samples,
             has_latency,
             aggregate,
+            aggregate.map(|value| value.latency_cycles_sum as f64),
+            1.0,
+        ),
+    );
+    values.insert(
+        format!("load_instruction.{name}.over_avg_est_time_pct"),
+        tail_avg_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
+            aggregate.map(|value| value.latency_cycles_sum as f64),
+            1.0,
+        ),
+    );
+    values.insert(
+        format!("load_instruction.{name}.over_p95_all_est_time_pct"),
+        tail_p95_est_time_value(
+            has_samples,
+            has_latency,
+            aggregate,
             est_time_denominator_cycles,
             spe_effective_period,
         ),
     );
     values.insert(
-        format!("load_instruction.{name}.over_avg_est_time_pct"),
+        format!("load_instruction.{name}.over_avg_all_est_time_pct"),
         tail_avg_est_time_value(
             has_samples,
             has_latency,
@@ -3245,6 +3310,21 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_instruction_lookup_is_unknown_not_missing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let mut cache = InstructionIndexCache::default();
+        let mut warnings = Vec::new();
+
+        let (class, load_kind) =
+            cache.classify_with_load_kind(&bundle, &BTreeMap::new(), 999, 0x1000, &mut warnings);
+
+        assert_eq!(class, InstructionClass::UnknownInstruction);
+        assert_eq!(load_kind, None);
+    }
+
+    #[test]
     fn raw_pmu_columns_are_event_sample_ratio_over_line_samples() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
@@ -3404,10 +3484,18 @@ mod tests {
         ));
         assert!(matches!(
             values.get("load_l1.over_p95_est_time_pct"),
-            Some(MetricValue::Number(value)) if (*value - 10.0).abs() < f64::EPSILON
+            Some(MetricValue::Number(value)) if (*value - 78.125).abs() < f64::EPSILON
         ));
         assert!(matches!(
             values.get("load_l1.over_avg_est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 85.9375).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_l1.over_p95_all_est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 10.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_l1.over_avg_all_est_time_pct"),
             Some(MetricValue::Number(value)) if (*value - 11.0).abs() < f64::EPSILON
         ));
     }
@@ -3445,10 +3533,16 @@ mod tests {
         {
             load_l1.record_latency(latency);
         }
+        let mut store_unknown = SpeCategoryAggregate::default();
+        store_unknown.sample_count = 1;
+        store_unknown.record_latency(720);
         let values = make_spe_category_summary_values(
-            &BTreeMap::from([(SpeReportCategory::LoadL1, load_l1)]),
-            20,
-            1280,
+            &BTreeMap::from([
+                (SpeReportCategory::LoadL1, load_l1),
+                (SpeReportCategory::StoreUnknown, store_unknown),
+            ]),
+            21,
+            2000,
         );
 
         assert!(matches!(
@@ -3458,6 +3552,14 @@ mod tests {
         assert!(matches!(
             values.get("load_l1.over_avg_est_time_pct"),
             Some(MetricValue::Number(value)) if (*value - 85.9375).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_l1.over_p95_all_est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 50.0).abs() < f64::EPSILON
+        ));
+        assert!(matches!(
+            values.get("load_l1.over_avg_all_est_time_pct"),
+            Some(MetricValue::Number(value)) if (*value - 55.0).abs() < 0.000001
         ));
     }
 
@@ -3514,6 +3616,31 @@ mod tests {
             metric_value_number(cpu_values.get("load_l1.vector_load.est_time_pct")),
             Some(60.0)
         );
+    }
+
+    #[test]
+    fn spe_hierarchy_tail_all_est_time_uses_cpu_denominator() {
+        let mut load_l1 = spe_hierarchy_parent(&[10, 10, 20, 60]);
+        spe_hierarchy_child(&mut load_l1, InstructionClass::ScalarLoad, &[10, 10, 20]);
+        let store_unknown = spe_hierarchy_parent(&[40]);
+
+        let values = make_spe_hierarchy_cpu_values_from_cpu_parents(&BTreeMap::from([(
+            4,
+            BTreeMap::from([
+                (SpeReportCategory::LoadL1, load_l1),
+                (SpeReportCategory::StoreUnknown, store_unknown),
+            ]),
+        )]));
+        let cpu_values = values.get(&4).expect("cpu 4 hierarchy values");
+
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.scalar_load.over_avg_est_time_pct")),
+            Some(50.0)
+        );
+        assert!(matches!(
+            metric_value_number(cpu_values.get("load_l1.scalar_load.over_avg_all_est_time_pct")),
+            Some(value) if (value - 14.285714285714285).abs() < 0.000001
+        ));
     }
 
     #[test]

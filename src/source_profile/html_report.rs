@@ -98,6 +98,8 @@ pub fn write_html_summary_from_model(
     #sourceTable th.sorted {{ background: #eef2f8; }}
     #filesTable th[data-file-sort] {{ cursor: pointer; user-select: none; }}
     #filesTable th.sorted {{ background: #eef2f8; }}
+    .spe-summary-table th[data-spe-sort] {{ cursor: pointer; user-select: none; }}
+    .spe-summary-table th.sorted {{ background: #eef2f8; }}
     .sort-indicator {{ display: inline-block; min-width: 1em; margin-left: 4px; color: #59636e; }}
     .source-line {{ display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px; font-family: Consolas, monospace; padding: 2px 4px; }}
     .source-line.NonZero {{ background: #fff8c5; }}
@@ -180,8 +182,12 @@ pub fn write_html_summary_from_model(
     <div id="speBreakdownColumnPicker" class="column-picker-controls"></div>
   </details>
   <table class="spe-summary-table">
-    <tr><th data-spe-column="cpu">CPU</th><th data-spe-column="category">Category</th><th data-spe-column="sample_pct">sample%</th><th data-spe-column="est_time_pct">est_time%</th><th data-spe-column="all_est_time_pct">all est_time%</th><th data-spe-column="min_latency_cycles">min_latency_cycles</th><th data-spe-column="max_latency_cycles">max_latency_cycles</th><th data-spe-column="avg_latency_cycles">avg_latency_cycles</th><th data-spe-column="std_latency_cycles">std_latency_cycles</th><th data-spe-column="p95_latency_cycles">p95_latency_cycles</th><th data-spe-column="p99_latency_cycles">p99_latency_cycles</th><th data-spe-column="over_theory_sample_pct">&gt;theory sample%</th><th data-spe-column="over_theory_est_time_pct">&gt;theory est_time%</th><th data-spe-column="over_p95_est_time_pct">&gt;p95 est_time%</th><th data-spe-column="over_avg_est_time_pct">&gt;avg est_time%</th><th data-spe-column="over_p95_all_est_time_pct">&gt;p95 all est_time%</th><th data-spe-column="over_avg_all_est_time_pct">&gt;avg all est_time%</th></tr>
+    <thead>
+    <tr><th data-spe-column="cpu" data-spe-sort="cpu" onclick="sortSpeBreakdown('cpu')">CPU <span class="sort-indicator"></span></th><th data-spe-column="category" data-spe-sort="category" onclick="sortSpeBreakdown('category')">Category <span class="sort-indicator"></span></th><th data-spe-column="sample_pct" data-spe-sort="sample_pct" onclick="sortSpeBreakdown('sample_pct')">sample% <span class="sort-indicator"></span></th><th data-spe-column="est_time_pct" data-spe-sort="est_time_pct" onclick="sortSpeBreakdown('est_time_pct')">est_time% <span class="sort-indicator"></span></th><th data-spe-column="all_est_time_pct" data-spe-sort="all_est_time_pct" onclick="sortSpeBreakdown('all_est_time_pct')">all est_time% <span class="sort-indicator"></span></th><th data-spe-column="min_latency_cycles" data-spe-sort="min_latency_cycles" onclick="sortSpeBreakdown('min_latency_cycles')">min_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="max_latency_cycles" data-spe-sort="max_latency_cycles" onclick="sortSpeBreakdown('max_latency_cycles')">max_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="avg_latency_cycles" data-spe-sort="avg_latency_cycles" onclick="sortSpeBreakdown('avg_latency_cycles')">avg_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="std_latency_cycles" data-spe-sort="std_latency_cycles" onclick="sortSpeBreakdown('std_latency_cycles')">std_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="p95_latency_cycles" data-spe-sort="p95_latency_cycles" onclick="sortSpeBreakdown('p95_latency_cycles')">p95_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="p99_latency_cycles" data-spe-sort="p99_latency_cycles" onclick="sortSpeBreakdown('p99_latency_cycles')">p99_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="over_theory_sample_pct" data-spe-sort="over_theory_sample_pct" onclick="sortSpeBreakdown('over_theory_sample_pct')">&gt;theory sample% <span class="sort-indicator"></span></th><th data-spe-column="over_theory_est_time_pct" data-spe-sort="over_theory_est_time_pct" onclick="sortSpeBreakdown('over_theory_est_time_pct')">&gt;theory est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_p95_est_time_pct" data-spe-sort="over_p95_est_time_pct" onclick="sortSpeBreakdown('over_p95_est_time_pct')">&gt;p95 est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_avg_est_time_pct" data-spe-sort="over_avg_est_time_pct" onclick="sortSpeBreakdown('over_avg_est_time_pct')">&gt;avg est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_p95_all_est_time_pct" data-spe-sort="over_p95_all_est_time_pct" onclick="sortSpeBreakdown('over_p95_all_est_time_pct')">&gt;p95 all est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_avg_all_est_time_pct" data-spe-sort="over_avg_all_est_time_pct" onclick="sortSpeBreakdown('over_avg_all_est_time_pct')">&gt;avg all est_time% <span class="sort-indicator"></span></th></tr>
+    </thead>
+    <tbody>
     {spe_hierarchy_summary_rows}
+    </tbody>
   </table>
   <div id="speHierarchyHistogram" class="spe-histogram-panel" hidden></div>
   </details>
@@ -287,6 +293,8 @@ pub fn write_html_summary_from_model(
     let activeSourceRows = [];
     let speHistogramDrag = null;
     let speHistogramManuallyPositioned = false;
+    let speBreakdownSortKey = "";
+    let speBreakdownSortAsc = true;
     const RAW_PMU_COLUMNS = {raw_pmu_columns_json};
     const DERIVED_PMU_COLUMNS = {derived_pmu_columns_json};
     const SPE_COLUMNS = {spe_columns_json};
@@ -404,6 +412,71 @@ pub fn write_html_summary_from_model(
       document.getElementById("speBreakdownColumnPicker").innerHTML = SPE_BREAKDOWN_COLUMNS
         .map(column => `<label><input type="checkbox" onchange="toggleSpeBreakdownColumn('${{column.key}}', this.checked)" ${{visibleSpeBreakdownColumns.has(column.key) ? "checked" : ""}}> ${{escapeText(column.label)}}</label>`)
         .join("");
+    }}
+    function isSpeTextSortColumn(key) {{
+      return key === "category";
+    }}
+    function defaultSpeSortAsc(key) {{
+      return key === "cpu" || isSpeTextSortColumn(key);
+    }}
+    function parseSpeNumericValue(text) {{
+      const cleaned = String(text ?? "").trim().replace(/,/g, "").replace(/%$/, "");
+      if (!cleaned || cleaned === "Missing" || cleaned === "N/A" || cleaned === "Unresolved") return null;
+      const value = Number.parseFloat(cleaned);
+      return Number.isFinite(value) ? value : null;
+    }}
+    function speParentSortValue(row, key) {{
+      if (key === "cpu") return Number.parseInt(row.dataset.speCpu || "0", 10);
+      if (key === "category") return row.dataset.speParent || "";
+      const cell = row.querySelector(`td[data-spe-column="${{CSS.escape(key)}}"]`);
+      return parseSpeNumericValue(cell?.textContent);
+    }}
+    function compareSpeParentRows(a, b, key) {{
+      const aValue = speParentSortValue(a.row, key);
+      const bValue = speParentSortValue(b.row, key);
+      if (isSpeTextSortColumn(key)) {{
+        const textCompare = String(aValue).localeCompare(String(bValue));
+        return textCompare || a.index - b.index;
+      }}
+      const aMissing = aValue === null || Number.isNaN(aValue);
+      const bMissing = bValue === null || Number.isNaN(bValue);
+      if (aMissing && bMissing) return a.index - b.index;
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+      return (aValue - bValue) || a.index - b.index;
+    }}
+    function sortSpeBreakdown(key) {{
+      if (speBreakdownSortKey === key) {{
+        speBreakdownSortAsc = !speBreakdownSortAsc;
+      }} else {{
+        speBreakdownSortKey = key;
+        speBreakdownSortAsc = defaultSpeSortAsc(key);
+      }}
+      const tbody = document.querySelector(".spe-summary-table tbody");
+      const groups = Array.from(tbody.querySelectorAll("tr[data-spe-child='']")).map((row, index) => ({{
+        row,
+        index,
+        children: speHierarchyChildRows(row.dataset.speCpu, row.dataset.speParent),
+      }}));
+      groups.sort((a, b) => {{
+        const result = compareSpeParentRows(a, b, key);
+        return speBreakdownSortAsc ? result : -result;
+      }});
+      groups.forEach(group => {{
+        tbody.appendChild(group.row);
+        group.children.forEach(child => tbody.appendChild(child));
+      }});
+      updateSpeBreakdownSortIndicators();
+      hideSpeHierarchyHistogram();
+    }}
+    function updateSpeBreakdownSortIndicators() {{
+      document.querySelectorAll(".spe-summary-table th[data-spe-sort]").forEach(th => {{
+        const active = th.dataset.speSort === speBreakdownSortKey;
+        th.classList.toggle("sorted", active);
+        th.setAttribute("aria-sort", active ? (speBreakdownSortAsc ? "ascending" : "descending") : "none");
+        const indicator = th.querySelector(".sort-indicator");
+        if (indicator) indicator.textContent = active ? (speBreakdownSortAsc ? "▲" : "▼") : "";
+      }});
     }}
     function speHierarchyChildRows(cpu, parent) {{
       return Array.from(document.querySelectorAll(".spe-summary-table tr[data-spe-child]"))
@@ -753,6 +826,7 @@ pub fn write_html_summary_from_model(
     }}
     renderSpeBreakdownColumnPicker();
     applySpeBreakdownColumnVisibility();
+    updateSpeBreakdownSortIndicators();
     renderSourceColumnPicker();
     renderSourceHeaders();
     renderSourceRows();
@@ -1043,6 +1117,9 @@ fn cpu_row_shade(cpu: u32) -> u32 {
 }
 
 fn is_zero_or_absent_summary(value: &str) -> bool {
+    if value.trim().is_empty() {
+        return true;
+    }
     if matches!(value, "N/A" | "Missing" | "Unresolved") {
         return true;
     }
@@ -1207,9 +1284,15 @@ fn is_spe_theory_metric_key(key: &str) -> bool {
 fn format_metric_for_summary(key: &str, value: f64) -> String {
     if is_percent_metric(key) {
         format_percentage_for_summary(value)
+    } else if is_integer_latency_bound_metric(key) {
+        format!("{value:.0}")
     } else {
         format_number_for_summary(value)
     }
+}
+
+fn is_integer_latency_bound_metric(key: &str) -> bool {
+    key.ends_with("min_latency_cycles") || key.ends_with("max_latency_cycles")
 }
 
 fn is_percent_metric(key: &str) -> bool {
@@ -2006,9 +2089,14 @@ mod tests {
         assert!(column_help_pos < spe_summary_pos);
         assert!(column_help_pos < source_lines_pos);
         assert!(html.contains("<table class=\"spe-summary-table\">"));
+        assert!(html.contains("<thead>"));
+        assert!(html.contains("<tbody>"));
         assert!(html.contains("<summary>SPE Hierarchical Breakdown Columns</summary>"));
         assert!(html.contains("id=\"speBreakdownColumnPicker\""));
         assert!(html.contains("data-spe-column=\"cpu\""));
+        assert!(html.contains("data-spe-sort=\"cpu\""));
+        assert!(html.contains("data-spe-sort=\"est_time_pct\""));
+        assert!(html.contains("onclick=\"sortSpeBreakdown('est_time_pct')\""));
         assert!(html.contains("data-spe-column=\"category\""));
         assert!(html.contains("data-spe-column=\"all_est_time_pct\""));
         assert!(html.contains("data-spe-column=\"over_avg_all_est_time_pct\""));
@@ -2019,6 +2107,10 @@ mod tests {
         assert!(html.contains("toggleSpeBreakdownColumn"));
         assert!(html.contains("renderSpeBreakdownColumnPicker"));
         assert!(html.contains("applySpeBreakdownColumnVisibility"));
+        assert!(html.contains("function sortSpeBreakdown(key)"));
+        assert!(html.contains("function compareSpeParentRows(a, b, key)"));
+        assert!(html.contains("updateSpeBreakdownSortIndicators"));
+        assert!(html.contains("tbody.appendChild(group.row);"));
         assert!(html.contains("id=\"speHierarchyHistogram\""));
         assert!(html.contains("class=\"spe-histogram-panel\" hidden"));
         assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS = "));
@@ -2320,6 +2412,101 @@ mod tests {
     }
 
     #[test]
+    fn spe_hierarchy_rows_hide_zero_rows_with_blank_theory_columns() {
+        let model = ReportModel {
+            rows: Vec::new(),
+            files: Vec::new(),
+            functions: Vec::new(),
+            frames: Vec::new(),
+            callchains: Vec::new(),
+            spe_cpu_category_values: BTreeMap::new(),
+            spe_cpu_category_histograms: BTreeMap::new(),
+            spe_hierarchical_cpu_values: BTreeMap::from([(
+                4,
+                BTreeMap::from([
+                    ("load_l3.sample_pct".to_string(), MetricValue::Number(0.0)),
+                    ("load_l3.est_time_pct".to_string(), MetricValue::Number(0.0)),
+                    (
+                        "load_l3.all_est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.min_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.max_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.avg_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.std_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.p95_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.p99_latency_cycles".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.over_theory_sample_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.over_theory_est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.over_p95_est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.over_avg_est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.over_p95_all_est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_l3.over_avg_all_est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    ("load_llc.sample_pct".to_string(), MetricValue::Number(0.0)),
+                    (
+                        "load_llc.est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_llc.all_est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                    (
+                        "load_llc.over_p95_est_time_pct".to_string(),
+                        MetricValue::Number(0.0),
+                    ),
+                ]),
+            )]),
+            spe_hierarchical_cpu_histograms: BTreeMap::new(),
+            instruction_cpu_class_values: BTreeMap::new(),
+            load_cpu_kind_values: BTreeMap::new(),
+            warnings: Vec::new(),
+        };
+
+        let rows = spe_hierarchy_summary_rows_html(&model, true);
+
+        assert!(rows.contains("No SPE hierarchy samples"));
+        assert!(!rows.contains("load_l3"));
+        assert!(!rows.contains("load_llc"));
+    }
+
+    #[test]
     fn html_renders_spe_hierarchy_rows_with_clickable_histograms() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let bundle =
@@ -2483,6 +2670,10 @@ mod tests {
         assert!(rows.contains("<td data-spe-column=\"cpu\">4</td>"));
         assert!(rows.contains("<td data-spe-column=\"est_time_pct\">100.000%</td>"));
         assert!(rows.contains("<td data-spe-column=\"all_est_time_pct\">100.000%</td>"));
+        assert!(rows.contains("<td data-spe-column=\"min_latency_cycles\">10</td>"));
+        assert!(rows.contains("<td data-spe-column=\"max_latency_cycles\">80</td>"));
+        assert!(!rows.contains("<td data-spe-column=\"min_latency_cycles\">10.000</td>"));
+        assert!(!rows.contains("<td data-spe-column=\"max_latency_cycles\">80.000</td>"));
         assert!(rows.contains("<td data-spe-column=\"over_theory_sample_pct\">100.000%</td>"));
         assert!(rows.contains("<td data-spe-column=\"over_theory_est_time_pct\">100.000%</td>"));
         assert!(rows.contains("<td data-spe-column=\"over_avg_all_est_time_pct\">35.000%</td>"));

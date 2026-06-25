@@ -519,6 +519,7 @@ fn write_spe_breakdown_sheet(
         "Level",
         "sample%",
         "est_time%",
+        "all est_time%",
         "min_latency_cycles",
         "max_latency_cycles",
         "avg_latency_cycles",
@@ -535,8 +536,8 @@ fn write_spe_breakdown_sheet(
         1,
         (headers.len() - 1) as u16,
         &[
-            8.0, 24.0, 24.0, 10.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 14.0, 14.0,
-            16.0, 16.0,
+            8.0, 24.0, 24.0, 10.0, 12.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 14.0,
+            14.0, 16.0, 16.0,
         ],
     )?;
     for (col, header) in headers.iter().enumerate() {
@@ -546,6 +547,7 @@ fn write_spe_breakdown_sheet(
     let metrics = [
         "sample_pct",
         "est_time_pct",
+        "all_est_time_pct",
         "min_latency_cycles",
         "max_latency_cycles",
         "avg_latency_cycles",

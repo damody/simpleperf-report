@@ -299,7 +299,7 @@ fn callchain_to_values(row: &super::report_model::ReportCallchainRow) -> Vec<Str
     ]
 }
 
-fn spe_breakdown_columns() -> [&'static str; 16] {
+fn spe_breakdown_columns() -> [&'static str; 17] {
     [
         "CPU",
         "Parent",
@@ -307,6 +307,7 @@ fn spe_breakdown_columns() -> [&'static str; 16] {
         "Level",
         "sample%",
         "est_time%",
+        "all est_time%",
         "min_latency_cycles",
         "max_latency_cycles",
         "avg_latency_cycles",
@@ -320,10 +321,11 @@ fn spe_breakdown_columns() -> [&'static str; 16] {
     ]
 }
 
-fn spe_breakdown_metrics() -> [&'static str; 12] {
+fn spe_breakdown_metrics() -> [&'static str; 13] {
     [
         "sample_pct",
         "est_time_pct",
+        "all_est_time_pct",
         "min_latency_cycles",
         "max_latency_cycles",
         "avg_latency_cycles",
@@ -503,7 +505,7 @@ mod tests {
         let csv = fs::read_to_string(out.join("csv/AllLines.csv")).unwrap();
         assert!(csv.contains("load_instruction.load_scalar_single.sample_pct"));
         let spe_csv = fs::read_to_string(out.join("csv/SPEBreakdown.csv")).unwrap();
-        assert!(spe_csv.contains("CPU,Parent,Child,Level,sample%,est_time%,min_latency_cycles,max_latency_cycles,avg_latency_cycles,std_latency_cycles,p95_latency_cycles,p99_latency_cycles,>p95 est_time%,>avg est_time%,>p95 all est_time%,>avg all est_time%"));
+        assert!(spe_csv.contains("CPU,Parent,Child,Level,sample%,est_time%,all est_time%,min_latency_cycles,max_latency_cycles,avg_latency_cycles,std_latency_cycles,p95_latency_cycles,p99_latency_cycles,>p95 est_time%,>avg est_time%,>p95 all est_time%,>avg all est_time%"));
         assert!(spe_csv.contains("4,load_l1,vector_load,child"));
     }
 
@@ -557,6 +559,10 @@ mod tests {
                     MetricValue::Number(35.0),
                 ),
                 (
+                    "load_l1.all_est_time_pct".to_string(),
+                    MetricValue::Number(100.0),
+                ),
+                (
                     "load_l1.vector_load.sample_pct".to_string(),
                     MetricValue::Number(60.0),
                 ),
@@ -603,6 +609,10 @@ mod tests {
                 (
                     "load_l1.vector_load.over_avg_all_est_time_pct".to_string(),
                     MetricValue::Number(45.0),
+                ),
+                (
+                    "load_l1.vector_load.all_est_time_pct".to_string(),
+                    MetricValue::Number(12.5),
                 ),
             ]),
         );

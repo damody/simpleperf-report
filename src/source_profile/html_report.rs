@@ -128,7 +128,9 @@ pub fn write_html_summary_from_model(
     .spe-summary-table tbody tr.selected td {{ outline: 2px solid #2563eb; outline-offset: -2px; }}
     .spe-histogram-panel {{ position: fixed; top: 0; left: 0; width: min(620px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; border: 1px solid #d0d7de; padding: 10px; background: #fff; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18); z-index: 20; border-radius: 4px; }}
     .spe-histogram-panel[hidden] {{ display: none; }}
-    .spe-histogram-title {{ font-weight: 600; margin-bottom: 8px; }}
+    .spe-histogram-header {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; cursor: move; user-select: none; }}
+    .spe-histogram-title {{ font-weight: 600; }}
+    .spe-histogram-hide {{ border: 1px solid #d0d7de; background: #fff; color: #24292f; padding: 2px 6px; cursor: pointer; border-radius: 4px; }}
     .spe-histogram-row {{ display: grid; grid-template-columns: 160px minmax(120px, 1fr) 64px; align-items: center; gap: 8px; margin: 4px 0; }}
     .spe-histogram-label {{ font-family: Consolas, monospace; font-size: 12px; }}
     .spe-histogram-bar-track {{ height: 14px; background: #f1f5f9; border: 1px solid #d0d7de; }}
@@ -144,6 +146,13 @@ pub fn write_html_summary_from_model(
 </head>
 <body>
   <h1>SourceLine Report</h1>
+  <details class="report-section">
+  <summary>Column Help</summary>
+  <table>
+    <tr><th>Column / Metric</th><th>Formula / Source</th><th>意義 / 限制</th></tr>
+    {column_help_rows}
+  </table>
+  </details>
   <details class="report-section" open>
   <summary>Summary</summary>
   <table>
@@ -167,18 +176,15 @@ pub fn write_html_summary_from_model(
   <details class="report-section" open>
   <summary>SPE Hierarchical Breakdown</summary>
   <p>SPE parent rows are CPU-relative. Child rows are relative to their parent category.</p>
+  <details class="column-panel">
+    <summary>SPE Hierarchical Breakdown Columns</summary>
+    <div id="speBreakdownColumnPicker" class="column-picker-controls"></div>
+  </details>
   <table class="spe-summary-table">
-    <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th><th>&gt;p95 all est_time%</th><th>&gt;avg all est_time%</th></tr>
+    <tr><th data-spe-column="cpu">CPU</th><th data-spe-column="category">Category</th><th data-spe-column="sample_pct">sample%</th><th data-spe-column="est_time_pct">est_time%</th><th data-spe-column="all_est_time_pct">all est_time%</th><th data-spe-column="min_latency_cycles">min_latency_cycles</th><th data-spe-column="max_latency_cycles">max_latency_cycles</th><th data-spe-column="avg_latency_cycles">avg_latency_cycles</th><th data-spe-column="std_latency_cycles">std_latency_cycles</th><th data-spe-column="p95_latency_cycles">p95_latency_cycles</th><th data-spe-column="p99_latency_cycles">p99_latency_cycles</th><th data-spe-column="over_p95_est_time_pct">&gt;p95 est_time%</th><th data-spe-column="over_avg_est_time_pct">&gt;avg est_time%</th><th data-spe-column="over_p95_all_est_time_pct">&gt;p95 all est_time%</th><th data-spe-column="over_avg_all_est_time_pct">&gt;avg all est_time%</th></tr>
     {spe_hierarchy_summary_rows}
   </table>
   <div id="speHierarchyHistogram" class="spe-histogram-panel" hidden></div>
-  </details>
-  <details class="report-section" open>
-  <summary>Column Help</summary>
-  <table>
-    <tr><th>Column / Metric</th><th>Formula / Source</th><th>Meaning / Limitation</th></tr>
-    {column_help_rows}
-  </table>
   </details>
   <details class="report-section">
     <summary>Quality</summary>
@@ -280,10 +286,30 @@ pub fn write_html_summary_from_model(
     let fileSortAsc = false;
     let activeFileRows = [];
     let activeSourceRows = [];
+    let speHistogramDrag = null;
+    let speHistogramManuallyPositioned = false;
     const RAW_PMU_COLUMNS = {raw_pmu_columns_json};
     const DERIVED_PMU_COLUMNS = {derived_pmu_columns_json};
     const SPE_COLUMNS = {spe_columns_json};
     const SPE_HIERARCHY_HISTOGRAMS = {spe_hierarchy_histograms_json};
+    const SPE_BREAKDOWN_COLUMNS = [
+      {{ key: "cpu", label: "CPU" }},
+      {{ key: "category", label: "Category" }},
+      {{ key: "sample_pct", label: "sample%" }},
+      {{ key: "est_time_pct", label: "est_time%" }},
+      {{ key: "all_est_time_pct", label: "all est_time%" }},
+      {{ key: "min_latency_cycles", label: "min_latency_cycles" }},
+      {{ key: "max_latency_cycles", label: "max_latency_cycles" }},
+      {{ key: "avg_latency_cycles", label: "avg_latency_cycles" }},
+      {{ key: "std_latency_cycles", label: "std_latency_cycles" }},
+      {{ key: "p95_latency_cycles", label: "p95_latency_cycles" }},
+      {{ key: "p99_latency_cycles", label: "p99_latency_cycles" }},
+      {{ key: "over_p95_est_time_pct", label: ">p95 est_time%" }},
+      {{ key: "over_avg_est_time_pct", label: ">avg est_time%" }},
+      {{ key: "over_p95_all_est_time_pct", label: ">p95 all est_time%" }},
+      {{ key: "over_avg_all_est_time_pct", label: ">avg all est_time%" }},
+    ];
+    let visibleSpeBreakdownColumns = new Set(SPE_BREAKDOWN_COLUMNS.map(column => column.key));
     const SOURCE_COLUMNS = [
       {{ key: "file", label: "File", cls: "col-file truncate", value: row => row.file }},
       {{ key: "line", label: "Line", cls: "col-line", value: row => row.line }},
@@ -355,6 +381,29 @@ pub fn write_html_summary_from_model(
       sourceOffset = 0;
       renderSourceRows();
     }}
+    function visibleSpeBreakdownColumnList() {{
+      return SPE_BREAKDOWN_COLUMNS.filter(column => visibleSpeBreakdownColumns.has(column.key));
+    }}
+    function applySpeBreakdownColumnVisibility() {{
+      document.querySelectorAll("[data-spe-column]").forEach(cell => {{
+        cell.hidden = !visibleSpeBreakdownColumns.has(cell.dataset.speColumn);
+      }});
+    }}
+    function toggleSpeBreakdownColumn(key, checked) {{
+      if (checked) {{
+        visibleSpeBreakdownColumns.add(key);
+      }} else if (visibleSpeBreakdownColumns.size > 1) {{
+        visibleSpeBreakdownColumns.delete(key);
+      }}
+      applySpeBreakdownColumnVisibility();
+      renderSpeBreakdownColumnPicker();
+      hideSpeHierarchyHistogram();
+    }}
+    function renderSpeBreakdownColumnPicker() {{
+      document.getElementById("speBreakdownColumnPicker").innerHTML = SPE_BREAKDOWN_COLUMNS
+        .map(column => `<label><input type="checkbox" onchange="toggleSpeBreakdownColumn('${{column.key}}', this.checked)" ${{visibleSpeBreakdownColumns.has(column.key) ? "checked" : ""}}> ${{escapeText(column.label)}}</label>`)
+        .join("");
+    }}
     function speHierarchyChildRows(cpu, parent) {{
       return Array.from(document.querySelectorAll(".spe-summary-table tr[data-spe-child]"))
         .filter(row => row.dataset.speCpu === cpu && row.dataset.speParent === parent && row.dataset.speChild);
@@ -372,6 +421,7 @@ pub fn write_html_summary_from_model(
     function positionSpeHierarchyHistogram(row) {{
       const panel = document.getElementById("speHierarchyHistogram");
       if (!panel || panel.hidden) return;
+      if (speHistogramManuallyPositioned) return;
       const margin = 12;
       const gap = 10;
       const rowRect = row.getBoundingClientRect();
@@ -386,6 +436,53 @@ pub fn write_html_summary_from_model(
       panel.style.left = `${{left}}px`;
       panel.style.top = `${{Math.max(margin, top)}}px`;
     }}
+    function clampSpeHistogramPosition(left, top) {{
+      const panel = document.getElementById("speHierarchyHistogram");
+      const margin = 12;
+      const rect = panel.getBoundingClientRect();
+      return {{
+        left: Math.min(Math.max(margin, left), Math.max(margin, window.innerWidth - rect.width - margin)),
+        top: Math.min(Math.max(margin, top), Math.max(margin, window.innerHeight - rect.height - margin)),
+      }};
+    }}
+    function startSpeHistogramDrag(event) {{
+      if (event.target.closest("button")) return;
+      const panel = document.getElementById("speHierarchyHistogram");
+      if (!panel || panel.hidden) return;
+      const rect = panel.getBoundingClientRect();
+      speHistogramDrag = {{
+        pointerId: event.pointerId,
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top,
+      }};
+      speHistogramManuallyPositioned = true;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    }}
+    function moveSpeHistogramDrag(event) {{
+      if (!speHistogramDrag || event.pointerId !== speHistogramDrag.pointerId) return;
+      const panel = document.getElementById("speHierarchyHistogram");
+      const position = clampSpeHistogramPosition(
+        event.clientX - speHistogramDrag.offsetX,
+        event.clientY - speHistogramDrag.offsetY,
+      );
+      panel.style.left = `${{position.left}}px`;
+      panel.style.top = `${{position.top}}px`;
+    }}
+    function endSpeHistogramDrag(event) {{
+      if (!speHistogramDrag || event.pointerId !== speHistogramDrag.pointerId) return;
+      speHistogramDrag = null;
+    }}
+    function hideSpeHierarchyHistogram() {{
+      const panel = document.getElementById("speHierarchyHistogram");
+      if (panel) panel.hidden = true;
+      speHistogramDrag = null;
+      speHistogramManuallyPositioned = false;
+      document.querySelectorAll(".spe-summary-table tr.selected").forEach(active => active.classList.remove("selected"));
+    }}
+    function speHistogramHeader(title) {{
+      return `<div class="spe-histogram-header" onpointerdown="startSpeHistogramDrag(event)" onpointermove="moveSpeHistogramDrag(event)" onpointerup="endSpeHistogramDrag(event)" onpointercancel="endSpeHistogramDrag(event)"><div class="spe-histogram-title">${{title}}</div><button type="button" class="spe-histogram-hide" onclick="hideSpeHierarchyHistogram()">Hide</button></div>`;
+    }}
     function renderSpeHierarchyHistogram(row) {{
       document.querySelectorAll(".spe-summary-table tr.selected").forEach(active => active.classList.remove("selected"));
       row.classList.add("selected");
@@ -398,8 +495,9 @@ pub fn write_html_summary_from_model(
       const histogram = SPE_HIERARCHY_HISTOGRAMS?.[cpu]?.[key];
       const panel = document.getElementById("speHierarchyHistogram");
       if (!histogram || !Array.isArray(histogram.bins) || histogram.bins.length === 0) {{
-        panel.innerHTML = `<div class="spe-histogram-title">${{title}}</div><div>No latency histogram data</div>`;
+        panel.innerHTML = `${{speHistogramHeader(title)}}<div>No latency histogram data</div>`;
         panel.hidden = false;
+        speHistogramManuallyPositioned = false;
         positionSpeHierarchyHistogram(row);
         return;
       }}
@@ -413,8 +511,10 @@ pub fn write_html_summary_from_model(
         const bar = count > 0 ? `<div class="spe-histogram-bar" style="width:${{width}}%"></div>` : "";
         return `<div class="spe-histogram-row"><div class="spe-histogram-label">${{start}}-${{end}}</div><div class="${{trackClass}}">${{bar}}</div><div class="spe-histogram-count">${{count}}</div></div>`;
       }}).join("");
-      panel.innerHTML = `<div class="spe-histogram-title">${{title}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})</div>${{rows}}`;
+      const histogramTitle = `${{title}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})`;
+      panel.innerHTML = `${{speHistogramHeader(histogramTitle)}}${{rows}}`;
       panel.hidden = false;
+      speHistogramManuallyPositioned = false;
       positionSpeHierarchyHistogram(row);
     }}
     window.addEventListener("resize", () => {{
@@ -650,6 +750,8 @@ pub fn write_html_summary_from_model(
         document.getElementById("qualityRows").insertAdjacentHTML("beforeend", `<tr><td>Diagnostics</td><td>Unavailable</td><td>${{escapeText(error.message)}}</td></tr>`);
       }}
     }}
+    renderSpeBreakdownColumnPicker();
+    applySpeBreakdownColumnVisibility();
     renderSourceColumnPicker();
     renderSourceHeaders();
     renderSourceRows();
@@ -870,21 +972,30 @@ fn displayed_load_instruction_column_keys(model: &ReportModel) -> Vec<String> {
 
 fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> String {
     let metrics = [
-        ("sample_pct", false),
-        ("est_time_pct", false),
-        ("min_latency_cycles", false),
-        ("max_latency_cycles", false),
-        ("avg_latency_cycles", false),
-        ("std_latency_cycles", false),
-        ("p95_latency_cycles", false),
-        ("p99_latency_cycles", false),
-        ("over_p95_est_time_pct", false),
-        ("over_avg_est_time_pct", false),
-        ("over_p95_all_est_time_pct", false),
-        ("over_avg_all_est_time_pct", false),
+        ("sample_pct", "sample_pct", false),
+        ("est_time_pct", "est_time_pct", false),
+        ("all_est_time_pct", "all_est_time_pct", false),
+        ("min_latency_cycles", "min_latency_cycles", false),
+        ("max_latency_cycles", "max_latency_cycles", false),
+        ("avg_latency_cycles", "avg_latency_cycles", false),
+        ("std_latency_cycles", "std_latency_cycles", false),
+        ("p95_latency_cycles", "p95_latency_cycles", false),
+        ("p99_latency_cycles", "p99_latency_cycles", false),
+        ("over_p95_est_time_pct", "over_p95_est_time_pct", false),
+        ("over_avg_est_time_pct", "over_avg_est_time_pct", false),
+        (
+            "over_p95_all_est_time_pct",
+            "over_p95_all_est_time_pct",
+            false,
+        ),
+        (
+            "over_avg_all_est_time_pct",
+            "over_avg_all_est_time_pct",
+            false,
+        ),
     ];
     if !spe_available {
-        return "<tr><td colspan=\"14\">SPE samples unavailable</td></tr>".to_string();
+        return "<tr><td colspan=\"15\">SPE samples unavailable</td></tr>".to_string();
     }
 
     let rows = model
@@ -894,7 +1005,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
             SPE_CATEGORY_NAMES.iter().flat_map(move |parent| {
                 let parent_values = metrics
                     .iter()
-                    .map(|(metric, show_na)| {
+                    .map(|(_, metric, show_na)| {
                         let key = format!("{parent}.{metric}");
                         summarize_spe_category_metric_from_values(values_by_key, &key, *show_na)
                     })
@@ -909,7 +1020,14 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                 let row_shade = cpu_row_shade(*cpu);
                 let parent_cells = parent_values
                     .into_iter()
-                    .map(|value| format!("<td>{}</td>", escape_html(&value)))
+                    .zip(metrics.iter())
+                    .map(|(value, (column, _, _))| {
+                        format!(
+                            "<td data-spe-column=\"{}\">{}</td>",
+                            escape_html(column),
+                            escape_html(&value)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("");
                 let child_rows = INSTRUCTION_CLASS_NAMES
@@ -917,7 +1035,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                     .filter_map(|child| {
                         let child_values = metrics
                             .iter()
-                            .map(|(metric, show_na)| {
+                            .map(|(_, metric, show_na)| {
                                 let key = format!("{parent}.{child}.{metric}");
                                 summarize_spe_category_metric_from_values(
                                     values_by_key,
@@ -934,11 +1052,18 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                         }
                         let cells = child_values
                             .into_iter()
-                            .map(|value| format!("<td>{}</td>", escape_html(&value)))
+                            .zip(metrics.iter())
+                            .map(|(value, (column, _, _))| {
+                                format!(
+                                    "<td data-spe-column=\"{}\">{}</td>",
+                                    escape_html(column),
+                                    escape_html(&value)
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join("");
                         Some(format!(
-                            "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"{}\" onclick=\"renderSpeHierarchyHistogram(this)\" hidden><td>{}</td><td class=\"spe-child-label\"><code>{}</code></td>{}</tr>",
+                            "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"{}\" onclick=\"renderSpeHierarchyHistogram(this)\" hidden><td data-spe-column=\"cpu\">{}</td><td data-spe-column=\"category\" class=\"spe-child-label\"><code>{}</code></td>{}</tr>",
                             cpu,
                             escape_html(parent),
                             escape_html(child),
@@ -955,7 +1080,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                     " data-spe-collapsible=\"true\" aria-expanded=\"false\"".to_string()
                 };
                 let mut rows = vec![format!(
-                    "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"\"{} onclick=\"renderSpeHierarchyHistogram(this)\"><td>{}</td><td><span class=\"spe-collapse-indicator\">{}</span><code>{}</code></td>{}</tr>",
+                    "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"\"{} onclick=\"renderSpeHierarchyHistogram(this)\"><td data-spe-column=\"cpu\">{}</td><td data-spe-column=\"category\"><span class=\"spe-collapse-indicator\">{}</span><code>{}</code></td>{}</tr>",
                     cpu,
                     escape_html(parent),
                     collapsible_attrs,
@@ -971,7 +1096,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
-        return "<tr><td colspan=\"14\">No SPE hierarchy samples</td></tr>".to_string();
+        return "<tr><td colspan=\"15\">No SPE hierarchy samples</td></tr>".to_string();
     }
     rows.join("\n")
 }
@@ -1161,42 +1286,64 @@ fn column_help_rows(
     spe_columns: &[String],
 ) -> String {
     let mut rows = vec![
-        help_row("File", "source path", "歸因後的 source file。"),
-        help_row("Line", "source line number", "歸因後的 source line。"),
+        help_row(
+            "File",
+            "source path",
+            "取樣位址經符號化與 debug line table 對應後落到的原始碼檔案；它代表 CPU 當下執行或 SPE 記錄的指令位置，不代表整個函式所有成本都來自此檔案。",
+        ),
+        help_row(
+            "Line",
+            "source line number",
+            "取樣位址對應到的原始碼行號；這是 profiler 看到硬體事件發生時 program counter 所在位置，若編譯器 inline、重排或最佳化，成本可能集中到看起來不直覺的行。",
+        ),
         help_row(
             "Function",
             "symbolized function",
-            "sample 所在或歸因到的 function。",
+            "取樣位址符號化後所屬函式；物理上表示事件發生時 CPU 正在執行的指令範圍，inline 或尾呼叫可能讓 source function 和執行位址的關係變得間接。",
         ),
-        help_row("Module", "ELF / shared object", "sample 來源 module。"),
-        help_row("CPU", "PERF_SAMPLE_CPU", "此列 sample 覆蓋到的 CPU id。"),
-        help_row("Thread", "sample TID", "此列 sample 覆蓋到的 thread id。"),
+        help_row(
+            "Module",
+            "ELF / shared object",
+            "取樣位址所在的 ELF 或 shared object；可用來分辨成本來自 app、系統函式庫或 JIT/匿名映射。",
+        ),
+        help_row(
+            "CPU",
+            "PERF_SAMPLE_CPU",
+            "產生 sample 的 CPU id；代表事件實際在該核心上被硬體計數器或 SPE 捕捉到，可用來看負載是否偏向特定核心或 cluster。",
+        ),
+        help_row(
+            "Thread",
+            "sample TID",
+            "產生 sample 的 thread id；代表事件發生時正在該 CPU 上執行的 Linux thread，可用來分辨熱點是由哪條執行緒造成。",
+        ),
         help_row(
             "Samples",
             "line PMU sample count",
-            "此 source line 收到的 PMU sample 次數，可用來判斷熱點可信度。",
+            "此 source line 收到的 PMU sample 次數；sample 越多代表該行在取樣期間越常觸發選定事件，統計可信度較高，但它仍是抽樣結果，不是精確執行次數。",
         ),
         help_row(
             "p %",
             "line self weight / global self weight * 100",
-            "全域 self 熱度比例；預設隱藏，可在 Columns 開啟。",
+            "此行自身事件權重佔全程自身事件權重的比例；物理意義是全域硬體事件熱度集中度，適合找直接落在該行的熱點，預設隱藏可在 Columns 開啟。",
         ),
         help_row(
             "acc %",
             "line accumulated weight / global accumulated weight * 100",
-            "全域 callchain 累積比例；預設隱藏，可在 Columns 開啟。",
+            "此行在 callchain 累積後佔全程累積權重的比例；代表包含子呼叫路徑後的整體成本歸因，適合找上層呼叫入口，預設隱藏可在 Columns 開啟。",
         ),
         help_row(
             "file p %",
             "line self weight / same-file self weight * 100",
-            "同檔案內 self 熱度比例；預設隱藏，可在 Columns 開啟。",
+            "此行自身事件權重佔同一 source file 自身事件權重的比例；用來看檔案內部哪幾行最集中硬體事件，避免大檔案被全域比例稀釋。",
         ),
         help_row(
             "file acc %",
             "line accumulated weight / same-file accumulated weight * 100",
-            "同檔案內 callchain 累積比例；預設隱藏，可在 Columns 開啟。",
+            "此行 callchain 累積權重佔同一 source file 累積權重的比例；用來比較同檔案內各呼叫入口或熱路徑的相對重要性。",
         ),
     ];
+
+    rows.extend(spe_hierarchical_breakdown_help_rows());
 
     for key in raw_pmu_columns {
         let event = bundle
@@ -1210,12 +1357,12 @@ fn column_help_rows(
         let meaning = event
             .map(|event| {
                 format!(
-                    "{}；Source Lines 顯示該 event 在此列 sample 中的比例或 Missing/Undefined。",
+                    "硬體 PMU 事件：{}。Source Lines 顯示此 event 在該列取樣資料中的比例或狀態；比例越高代表該原始碼位置越常伴隨此硬體現象，但受取樣週期、事件 multiplex 與歸因精度影響。",
                     event.display_name
                 )
             })
             .unwrap_or_else(|| {
-                "MProfiler 選擇的 PMU event；Source Lines 顯示此列 sample 中的 event 比例或 Missing/Undefined。"
+                "MProfiler 選擇的 PMU event；Source Lines 顯示此列 sample 中的 event 比例或 Missing/Undefined。比例代表硬體事件在該 source line 的抽樣集中程度，不是精確事件總數。"
                     .to_string()
             });
         rows.push(help_row(&format!("`{key}`"), &source, &meaning));
@@ -1226,47 +1373,47 @@ fn column_help_rows(
             "cpi" => help_row(
                 "`cpi`",
                 "cpu_cycles / inst_retired",
-                "平均每退休一條指令消耗的 cycles；分母缺失或為 0 時為 Missing/Undefined。",
+                "平均每退休一條指令消耗的 CPU cycles；數值越高通常代表 pipeline stall、memory 等待、分支錯誤或其他延遲較多。分母缺失或為 0 時為 Missing/Undefined。",
             ),
             "l1d_cache_hit_rate" => help_row(
                 "`l1d_cache_hit_rate`",
                 "(l1d_cache_access - l1d_cache_refill) / l1d_cache_access",
-                "L1D hit rate 的 sampling 近似。",
+                "L1 data cache 存取命中比例的 sampling 近似；越高表示資料多半在 L1D 取得，越低通常代表較多 refill，需要往 L2/L3/DRAM 等更慢層級查找。",
             ),
             "l2d_cache_hit_rate" => help_row(
                 "`l2d_cache_hit_rate`",
                 "(l2d_cache_access - l2d_cache_refill) / l2d_cache_access",
-                "L2D hit rate 的 sampling 近似。",
+                "L2 data cache 存取命中比例的 sampling 近似；可用來判斷 L1 miss 後是否多半由 L2 承接，較低通常表示更多請求流向 LLC 或 DRAM。",
             ),
             "l3d_cache_hit_rate" => help_row(
                 "`l3d_cache_hit_rate`",
                 "(l3d_cache_access - l3d_cache_refill) / l3d_cache_access",
-                "L3D hit rate 的 sampling 近似。",
+                "L3/LLC data cache 存取命中比例的 sampling 近似；較低代表更多資料請求離開片上 cache，可能造成 DRAM latency 與頻寬壓力。",
             ),
             "branch_miss_rate" => help_row(
                 "`branch_miss_rate`",
                 "branch_mispredict / branch_retired",
-                "分支預測錯誤比例的 sampling 近似。",
+                "退休分支中被硬體分支預測器猜錯的比例；越高代表 pipeline flush 較多，控制流程不可預測性可能正在消耗 cycles。",
             ),
             "mpki" => help_row(
                 "`mpki`",
                 "l1d_cache_refill / inst_retired * 1000",
-                "每千指令 L1D refill sampling 近似。",
+                "每千條退休指令觸發多少次 L1D refill 的 sampling 近似；用來把 cache miss 壓力正規化到指令量，方便比較不同熱點的記憶體行為。",
             ),
             "mips" => help_row(
                 "`mips`",
                 "inst_retired / effective_time_seconds / 1,000,000",
-                "每秒百萬退休指令，source line 層級是 sample 歸因後的近似活動量。",
+                "每秒百萬退休指令；代表 CPU 在此區域完成指令的吞吐量。Source line 層級是 sample 歸因後的近似活動量，不等同單行實際執行速度。",
             ),
             "mcps" => help_row(
                 "`mcps`",
                 "cpu_cycles / effective_time_seconds / 1,000,000",
-                "每秒百萬 CPU cycles，source line 層級是 sample 歸因後的近似活動量。",
+                "每秒百萬 CPU cycles；代表此區域消耗核心時鐘週期的強度。Source line 層級是 sample 歸因近似，適合和 CPI、cache/branch 指標一起判斷瓶頸來源。",
             ),
             _ => help_row(
                 &format!("`{key}`"),
                 "derived PMU metric",
-                "由 MProfiler 選擇的 PMU events 推導。",
+                "由 MProfiler 選擇的 PMU events 推導出的硬體行為指標；物理意義取決於分子與分母事件，通常用來把原始計數轉成率、比例或正規化壓力。",
             ),
         });
     }
@@ -1276,27 +1423,27 @@ fn column_help_rows(
             "spe_sample_count" => help_row(
                 "`spe_sample_count`",
                 "decoded SPE sample count",
-                "此列歸因到的 SPE sample 數。",
+                "此列歸因到的 Arm SPE sample 數；每個 sample 代表硬體抽樣到的一次資料存取、分支或指令事件，數量越多代表該 source line 的 SPE 觀測越穩定。",
             ),
             "spe_latency_cycles_avg" => help_row(
                 "`spe_latency_cycles_avg`",
                 "SPE latency cycles sum / count",
-                "SPE 記錄的平均 latency cycles；缺 field 時為 Missing。",
+                "SPE 記錄的平均 latency cycles；物理上是被抽樣事件從發出到完成或被量測到的延遲週期，越高通常代表 memory hierarchy、同步或 pipeline 等待較重。缺 latency field 時為 Missing。",
             ),
             "spe_cache_hit_rate" => help_row(
                 "`spe_cache_hit_rate`",
                 "SPE cache hit / cache total",
-                "SPE packet decode 後的 cache hit rate。",
+                "SPE packet 解碼後判定為 cache hit 的比例；越高表示被抽樣的資料存取較常在片上 cache 命中，越低表示較多存取落到較慢層級或無法判定。",
             ),
             "spe_branch_miss_rate" => help_row(
                 "`spe_branch_miss_rate`",
                 "SPE branch miss / branch total",
-                "SPE packet decode 後的 branch miss rate。",
+                "SPE packet 解碼後分支 miss 的比例；反映被抽樣分支中造成預測失敗或控制流程延遲的程度，適合搭配 branch_unknown / branch_miss 類別檢查。",
             ),
             "spe_decode_errors" => help_row(
                 "`spe_decode_errors`",
                 "SPE decode error count",
-                "SPE packet decode 失敗數。",
+                "SPE packet decode 失敗數；代表部分硬體記錄無法被解析成完整事件，數值越高表示 SPE 指標可能低估或分類不完整。",
             ),
             _ if is_spe_category_metric(key) => help_row(
                 &format!("`{key}`"),
@@ -1316,7 +1463,7 @@ fn column_help_rows(
             _ => help_row(
                 &format!("`{key}`"),
                 "SPE metric",
-                "Arm SPE decoded metric。",
+                "Arm SPE 解碼後的硬體取樣指標；代表被抽樣到的實際執行或記憶體事件，仍受 SPE 取樣率、packet 欄位完整度與位址歸因影響。",
             ),
         });
     }
@@ -1324,9 +1471,89 @@ fn column_help_rows(
     rows.push(help_row(
         "Code",
         "source text",
-        "該 source line 的原始碼內容。",
+        "該 source line 的原始碼內容；用來把硬體事件歸因結果和程式碼對齊，但最佳化後的機器指令可能不會一對一對應到這行文字。",
     ));
     rows.join("\n")
+}
+
+fn spe_hierarchical_breakdown_help_rows() -> Vec<String> {
+    vec![
+        help_row(
+            "SPE Hierarchical Breakdown: CPU",
+            "PERF_SAMPLE_CPU",
+            "該 SPE breakdown row 所屬 CPU；代表這一列的 SPE samples 是在這顆核心上被硬體記錄到，可用來看某個核心或 cluster 是否承擔特定 memory / branch / compute 行為。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: Category",
+            "SPE parent category or parent.child category",
+            "父節點是 SPE 對資料來源或操作種類的分類，例如 load_l1、load_dram、branch_unknown、compute_unknown；展開後的子節點是該父節點底下的 instruction class，用來看同一硬體現象主要由哪類指令造成。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: sample%",
+            "parent: category samples / CPU SPE samples; child: child samples / parent samples",
+            "sample 數量佔比，反映某類事件在 SPE 抽樣中出現的頻率。父節點用該 CPU 全部 SPE samples 當分母；子節點用父分類 samples 當分母。它描述發生頻率，不代表耗時，低頻但高 latency 的事件仍可能很重要。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: est_time%",
+            "parent: category latency cycles / CPU SPE latency cycles; child: child latency cycles / parent latency cycles",
+            "估算時間佔比，以 SPE latency cycles 當作時間權重。父節點是 CPU-relative，表示此硬體分類佔該 CPU 被 SPE 觀測到的總 latency 比例；子節點是 parent-relative，用來看父分類內部由哪些指令類型貢獻 latency。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: all est_time%",
+            "row latency cycles / CPU SPE latency cycles",
+            "全域估算時間佔比，不論父節點或子節點都用該 CPU 全部 SPE latency cycles 當分母。它保留子節點對整體時間的真實權重，適合比較展開後哪個子項真正佔整體 latency，而不是只看父分類內的比例。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: min_latency_cycles",
+            "minimum SPE latency cycles in this row",
+            "此 row 被抽樣事件中最小的 latency cycles；代表該硬體現象在最佳情況下的觀測延遲。沒有 latency field 時為 Missing，且單一極小值容易受取樣雜訊影響。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: max_latency_cycles",
+            "maximum SPE latency cycles in this row",
+            "此 row 被抽樣事件中最大的 latency cycles；代表最極端的長尾延遲。它能暴露偶發 stall，但單一最大值可能是離群點，需要搭配 p95、p99 和時間佔比判斷。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: avg_latency_cycles",
+            "row latency cycles sum / row sample count",
+            "此 row 的平均 SPE latency cycles；代表每次被抽樣事件平均等待多少核心週期。平均值會被少量長尾拉高，所以要和 p95/p99 一起看分布形狀。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: std_latency_cycles",
+            "population standard deviation of row latency cycles",
+            "此 row latency cycles 的 population standard deviation；數值越大表示延遲越不穩定，可能存在 cache 層級混雜、同步等待或偶發 DRAM/remote access。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: p95_latency_cycles",
+            "nearest-rank p95 SPE latency cycles in this row",
+            "此 row 的 p95 latency 門檻；約 95% samples 的 latency 不超過此值。它比平均值更能描述長尾開始的位置，用來切出高延遲區段。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: p99_latency_cycles",
+            "nearest-rank p99 SPE latency cycles in this row",
+            "此 row 的 p99 latency 門檻；描述最慢 1% 附近的延遲水準。它對樣本數較敏感，樣本很少時應視為方向性訊號。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: >p95 est_time%",
+            "latency cycles where sample latency > row p95 / row latency cycles",
+            "此 row 內 latency 超過 p95 的 samples 所累積的 latency cycles，佔此 row 自身總 latency 的比例。它回答「這個分類自己的時間有多少被最慢那段長尾吃掉」。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: >avg est_time%",
+            "latency cycles where sample latency > row average / row latency cycles",
+            "此 row 內 latency 超過平均值的 samples 所累積的 latency cycles，佔此 row 自身總 latency 的比例。它用平均值作為較寬鬆門檻，觀察高於一般水準的等待時間佔比。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: >p95 all est_time%",
+            "latency cycles where sample latency > row p95 / CPU SPE latency cycles",
+            "此 row 超過 p95 的長尾 latency 佔該 CPU 全部 SPE latency 的比例。它回答「這個分類最慢 5% 左右的高峰延遲，對整體時間到底有多大」，適合比較哪個長尾最值得優先處理。",
+        ),
+        help_row(
+            "SPE Hierarchical Breakdown: >avg all est_time%",
+            "latency cycles where sample latency > row average / CPU SPE latency cycles",
+            "此 row 超過平均值的 latency 佔該 CPU 全部 SPE latency 的比例。它比 p95 門檻涵蓋更多高於一般水準的等待時間，可用來比較哪個分類的高延遲區段對整體成本影響最大。",
+        ),
+    ]
 }
 
 fn is_spe_category_metric(key: &str) -> bool {
@@ -1388,8 +1615,48 @@ fn instruction_class_metric_formula(key: &str) -> &'static str {
     }
 }
 
-fn instruction_class_metric_meaning(_key: &str) -> &'static str {
-    "Instruction classes are decoded from sampled PC opcodes and are not root-cause inference."
+fn instruction_class_metric_meaning(key: &str) -> &'static str {
+    match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_pct") => {
+            "此 instruction class 在 SPE samples 中出現的比例；物理上代表硬體抽樣到的指令種類分布，不等同執行時間。"
+        }
+        Some("spe_latency_pct") | Some("est_time_pct") => {
+            "此 instruction class 累積 SPE latency cycles 佔總 SPE latency 的比例；可視為該類指令對被觀測等待時間的貢獻，但不是精確 wall time。"
+        }
+        Some("min_latency_cycles") => {
+            "此 instruction class 被抽樣事件的最小 latency cycles；反映該類指令在最佳觀測情況下的等待成本。"
+        }
+        Some("max_latency_cycles") => {
+            "此 instruction class 被抽樣事件的最大 latency cycles；用來暴露該類指令是否曾出現極端 stall。"
+        }
+        Some("avg_latency_cycles") => {
+            "此 instruction class 的平均 SPE latency cycles；代表該類指令每次被抽樣時平均等待多少核心週期，會受長尾事件拉高。"
+        }
+        Some("std_latency_cycles") => {
+            "此 instruction class latency cycles 的離散程度；越高表示同類指令的延遲不穩定，可能混合不同 cache 層級或同步狀態。"
+        }
+        Some("p95_latency_cycles") => {
+            "此 instruction class 的 p95 latency 門檻；用來判斷該類指令高延遲長尾從哪個週期數開始。"
+        }
+        Some("p99_latency_cycles") => {
+            "此 instruction class 的 p99 latency 門檻；描述最慢一小段樣本的延遲水準，樣本少時需謹慎解讀。"
+        }
+        Some("over_p95_est_time_pct") => {
+            "此 instruction class 中超過自身 p95 的長尾 latency，佔該類指令自身 latency 的比例；用來看該類指令是否被少量極慢事件主導。"
+        }
+        Some("over_avg_est_time_pct") => {
+            "此 instruction class 中超過自身平均值的 latency，佔該類指令自身 latency 的比例；用較寬鬆門檻觀察高延遲區段。"
+        }
+        Some("over_p95_all_est_time_pct") => {
+            "此 instruction class 超過自身 p95 的長尾 latency，佔全部 SPE latency 的比例；用來比較哪類指令的長尾真正影響整體時間。"
+        }
+        Some("over_avg_all_est_time_pct") => {
+            "此 instruction class 超過自身平均值的 latency，佔全部 SPE latency 的比例；用來比較哪類指令的高延遲區段對整體成本最大。"
+        }
+        _ => {
+            "instruction class 是由 sampled PC 對應到的機器指令 opcode 解碼而來；它描述硬體事件發生時正在執行哪類指令，但不是根因推論。"
+        }
+    }
 }
 
 fn load_instruction_metric_formula(key: &str) -> &'static str {
@@ -1427,8 +1694,48 @@ fn load_instruction_metric_formula(key: &str) -> &'static str {
     }
 }
 
-fn load_instruction_metric_meaning(_key: &str) -> &'static str {
-    "Load instruction kinds are decoded from sampled PC opcodes using debug ELF .text; source files are not required."
+fn load_instruction_metric_meaning(key: &str) -> &'static str {
+    match key.rsplit_once('.').map(|(_, metric)| metric) {
+        Some("sample_pct") => {
+            "此 load instruction kind 在 load 類 SPE samples 中出現的比例；物理上代表硬體抽樣到的 load 指令型態分布，不等同耗時。"
+        }
+        Some("spe_latency_pct") | Some("est_time_pct") => {
+            "此 load instruction kind 累積 SPE latency cycles 佔 load 指令總 latency 的比例；可用來看哪種 load 型態消耗最多被觀測等待時間。"
+        }
+        Some("min_latency_cycles") => {
+            "此 load instruction kind 的最小 latency cycles；代表該類 load 在最佳觀測情況下可多快由 cache/memory hierarchy 回應。"
+        }
+        Some("max_latency_cycles") => {
+            "此 load instruction kind 的最大 latency cycles；用來找是否有偶發極慢 load，例如 DRAM、remote 或同步造成的等待。"
+        }
+        Some("avg_latency_cycles") => {
+            "此 load instruction kind 的平均 latency cycles；代表該類 load 平均等待資料返回的核心週期數，會被長尾 memory access 拉高。"
+        }
+        Some("std_latency_cycles") => {
+            "此 load instruction kind latency cycles 的離散程度；越高表示同一 load 型態可能同時打到不同 cache/memory 層級。"
+        }
+        Some("p95_latency_cycles") => {
+            "此 load instruction kind 的 p95 latency 門檻；用來觀察慢速 load 的長尾起點。"
+        }
+        Some("p99_latency_cycles") => {
+            "此 load instruction kind 的 p99 latency 門檻；描述最慢 load 族群的延遲水準，對樣本數較敏感。"
+        }
+        Some("over_p95_est_time_pct") => {
+            "此 load instruction kind 中超過自身 p95 的 load latency，佔該類 load 自身 latency 的比例；可判斷是否少數極慢 load 主導該類成本。"
+        }
+        Some("over_avg_est_time_pct") => {
+            "此 load instruction kind 中超過自身平均值的 load latency，佔該類 load 自身 latency 的比例；用來看高於一般水準的資料等待佔比。"
+        }
+        Some("over_p95_all_est_time_pct") => {
+            "此 load instruction kind 超過自身 p95 的長尾 latency，佔全部 load 指令 latency 的比例；用來比較哪種 load 型態的長尾最影響整體。"
+        }
+        Some("over_avg_all_est_time_pct") => {
+            "此 load instruction kind 超過自身平均值的 latency，佔全部 load 指令 latency 的比例；用來比較哪種 load 型態的高延遲區段最花時間。"
+        }
+        _ => {
+            "load instruction kind 是由 sampled PC 對應到的機器指令 opcode 解碼而來；它描述資料讀取指令型態，不需要 source file，但仍依賴 debug ELF .text 可讀。"
+        }
+    }
 }
 
 fn spe_category_metric_formula(key: &str) -> &'static str {
@@ -1465,33 +1772,49 @@ fn spe_category_metric_meaning(key: &str) -> &'static str {
         key.rsplit_once('.').map(|(category, _)| category),
         Some("compute_unknown")
     ) {
-        return "SPE captured a non-load/store/branch operation. The report has not decoded the sampled instruction opcode yet, so this is the first compute bucket rather than int/FP/SIMD/crypto.";
+        return "SPE 捕捉到非 load/store/branch 的操作，但目前尚未把 sampled PC 的 opcode 細分成 int、FP/SIMD 或 crypto，因此先歸在 compute_unknown；它表示這段時間主要不是明確的記憶體或分支事件。";
     }
     match key.rsplit_once('.').map(|(_, metric)| metric) {
-        Some("sample_pct") => "此類 SPE sample 在整份 session 中的比例；不是時間。",
-        Some("spe_latency_pct") => "此類 SPE latency cycles 佔比；沒有 latency field 時為 Missing。",
-        Some("est_time_pct") => {
-            "估算時間佔比；目前用此分類的 SPE latency cycles 佔整份 session SPE latency cycles 的比例。"
+        Some("sample_pct") => {
+            "此 SPE category 在整份 session 中的 sample 數量比例；物理上代表硬體抽樣到此類 data source 或 operation 的頻率，不是時間佔比。"
         }
-        Some("min_latency_cycles") => "此類 SPE sample 實測 latency cycles 最小值。",
-        Some("max_latency_cycles") => "此類 SPE sample 實測 latency cycles 最大值。",
-        Some("avg_latency_cycles") => "此類 SPE sample 實測 latency cycles 平均值。",
-        Some("std_latency_cycles") => "此類 SPE sample 實測 latency cycles 的 population standard deviation。",
-        Some("p95_latency_cycles") => "此類 SPE sample latency cycles 的 nearest-rank p95。",
-        Some("p99_latency_cycles") => "此類 SPE sample latency cycles 的 nearest-rank p99。",
+        Some("spe_latency_pct") => {
+            "此 SPE category 累積 latency cycles 的比例；物理上代表該類事件對被觀測等待時間的貢獻。沒有 latency field 時為 Missing。"
+        }
+        Some("est_time_pct") => {
+            "估算時間佔比；目前用此分類的 SPE latency cycles 佔整份 session SPE latency cycles 的比例，適合判斷哪類硬體事件最消耗等待時間。"
+        }
+        Some("min_latency_cycles") => {
+            "此類 SPE sample 實測 latency cycles 最小值；代表該類事件在最佳觀測情況下的硬體等待成本。"
+        }
+        Some("max_latency_cycles") => {
+            "此類 SPE sample 實測 latency cycles 最大值；用來暴露該類事件是否存在極端長尾或偶發 stall。"
+        }
+        Some("avg_latency_cycles") => {
+            "此類 SPE sample 實測 latency cycles 平均值；代表每次被抽樣事件平均等待多少核心週期，會被長尾事件影響。"
+        }
+        Some("std_latency_cycles") => {
+            "此類 SPE sample latency cycles 的 population standard deviation；越高表示延遲分布越分散，可能混合多種 cache/memory 層級。"
+        }
+        Some("p95_latency_cycles") => {
+            "此類 SPE sample latency cycles 的 nearest-rank p95；代表高延遲長尾開始的位置，約 95% 樣本不超過此值。"
+        }
+        Some("p99_latency_cycles") => {
+            "此類 SPE sample latency cycles 的 nearest-rank p99；代表最慢 1% 附近的延遲水準，樣本少時需謹慎解讀。"
+        }
         Some("over_p95_est_time_pct") => {
-            "此類 SPE sample 中 latency cycles 大於該類 p95 的估算時間佔此類自身估算時間比例。"
+            "此類 SPE sample 中 latency cycles 大於該類 p95 的長尾時間，佔此類自身估算時間比例；用來看此分類是否被少量極慢事件主導。"
         }
         Some("over_avg_est_time_pct") => {
-            "此類 SPE sample 中 latency cycles 大於該類平均值的估算時間佔此類自身估算時間比例。"
+            "此類 SPE sample 中 latency cycles 大於該類平均值的時間，佔此類自身估算時間比例；用較寬鬆門檻觀察高於一般水準的等待成本。"
         }
         Some("over_p95_all_est_time_pct") => {
-            "此類 SPE sample 中 latency cycles 大於該類 p95 的估算時間佔全部時間比例，用來比較哪個長尾最花總時間。"
+            "此類 SPE sample 中 latency cycles 大於該類 p95 的長尾時間，佔全部 SPE latency 的比例；用來比較哪個分類的最慢區段最花總時間。"
         }
         Some("over_avg_all_est_time_pct") => {
-            "此類 SPE sample 中 latency cycles 大於該類平均值的估算時間佔全部時間比例，用來比較哪個長尾最花總時間。"
+            "此類 SPE sample 中 latency cycles 大於該類平均值的時間，佔全部 SPE latency 的比例；用來比較哪個分類的高延遲區段最影響整體。"
         }
-        _ => "Arm SPE category decoded metric。",
+        _ => "Arm SPE 解碼後的 category 指標；描述硬體抽樣到的 data source 或 operation 類型，仍受取樣率與 packet 欄位完整度影響。",
     }
 }
 
@@ -1702,17 +2025,43 @@ mod tests {
             .unwrap();
         let column_help_pos = html.find("<summary>Column Help</summary>").unwrap();
         let source_lines_pos = html.find("<summary>Source Lines</summary>").unwrap();
-        assert!(summary_pos < spe_summary_pos);
-        assert!(spe_summary_pos < column_help_pos);
+        assert!(column_help_pos < summary_pos);
+        assert!(column_help_pos < spe_summary_pos);
         assert!(column_help_pos < source_lines_pos);
         assert!(html.contains("<table class=\"spe-summary-table\">"));
-        assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th><th>&gt;p95 all est_time%</th><th>&gt;avg all est_time%</th>"));
+        assert!(html.contains("<summary>SPE Hierarchical Breakdown Columns</summary>"));
+        assert!(html.contains("id=\"speBreakdownColumnPicker\""));
+        assert!(html.contains("data-spe-column=\"cpu\""));
+        assert!(html.contains("data-spe-column=\"category\""));
+        assert!(html.contains("data-spe-column=\"all_est_time_pct\""));
+        assert!(html.contains("data-spe-column=\"over_avg_all_est_time_pct\""));
+        assert!(!html.contains("data-spe-column=\"est_time_pct_tail\""));
+        assert!(!html.contains("data-spe-column=\"all_est_time_pct_tail\""));
+        assert!(html.contains("const SPE_BREAKDOWN_COLUMNS = ["));
+        assert!(html.contains("visibleSpeBreakdownColumns"));
+        assert!(html.contains("toggleSpeBreakdownColumn"));
+        assert!(html.contains("renderSpeBreakdownColumnPicker"));
+        assert!(html.contains("applySpeBreakdownColumnVisibility"));
         assert!(html.contains("id=\"speHierarchyHistogram\""));
         assert!(html.contains("class=\"spe-histogram-panel\" hidden"));
         assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS = "));
         assert!(html.contains("function positionSpeHierarchyHistogram(row)"));
+        assert!(html.contains("let speHistogramDrag = null;"));
+        assert!(html.contains("let speHistogramManuallyPositioned = false;"));
+        assert!(html.contains("function startSpeHistogramDrag(event)"));
+        assert!(html.contains("function moveSpeHistogramDrag(event)"));
+        assert!(html.contains("function endSpeHistogramDrag(event)"));
+        assert!(html.contains("function clampSpeHistogramPosition(left, top)"));
+        assert!(html.contains("function hideSpeHierarchyHistogram()"));
+        assert!(html.contains("function speHistogramHeader(title)"));
         assert!(html.contains("function renderSpeHierarchyHistogram"));
         assert!(html.contains("position: fixed"));
+        assert!(html.contains("cursor: move"));
+        assert!(html.contains("onpointerdown=\"startSpeHistogramDrag(event)\""));
+        assert!(html.contains("onpointermove=\"moveSpeHistogramDrag(event)\""));
+        assert!(html.contains("speHistogramManuallyPositioned = true;"));
+        assert!(html.contains("class=\"spe-histogram-hide\""));
+        assert!(html.contains("onclick=\"hideSpeHierarchyHistogram()\""));
         assert!(html.contains("window.innerWidth - panelWidth - margin"));
         assert!(html.contains("let top = rowRect.bottom + gap;"));
         assert!(html.contains("positionSpeHierarchyHistogram(row);"));
@@ -1723,11 +2072,27 @@ mod tests {
         assert!(!html.contains("<summary>Load Instruction Summary</summary>"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
-        assert!(html.contains("<tr><td colspan=\"14\">SPE samples unavailable</td></tr>"));
+        assert!(html.contains("<tr><td colspan=\"15\">SPE samples unavailable</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
-        assert!(html
+        assert!(
+            html.contains("<details class=\"report-section\">\n  <summary>Column Help</summary>")
+        );
+        assert!(!html
             .contains("<details class=\"report-section\" open>\n  <summary>Column Help</summary>"));
         assert!(html.contains("Formula / Source"));
+        assert!(html.contains("意義 / 限制"));
+        assert!(!html.contains("Meaning / Limitation"));
+        assert!(html.contains("取樣位址經符號化與 debug line table 對應後落到的原始碼檔案"));
+        assert!(html.contains("平均每退休一條指令消耗的 CPU cycles"));
+        assert!(html.contains("每秒百萬退休指令"));
+        assert!(html.contains("SPE 記錄的平均 latency cycles"));
+        assert!(html.contains("SPE Hierarchical Breakdown: sample%"));
+        assert!(html.contains("SPE Hierarchical Breakdown: est_time%"));
+        assert!(html.contains("SPE Hierarchical Breakdown: all est_time%"));
+        assert!(html.contains("子節點是 parent-relative"));
+        assert!(html.contains("全域估算時間佔比"));
+        assert!(html.contains("適合比較展開後哪個子項真正佔整體 latency"));
+        assert!(html.contains("SPE Hierarchical Breakdown: &gt;p95 all est_time%"));
         assert!(html.contains("line PMU sample count"));
         assert!(html.contains("<code>cpu_cycles</code>"));
         assert!(html.contains("<code>inst_retired</code>"));
@@ -1989,6 +2354,10 @@ mod tests {
                         MetricValue::Number(35.0),
                     ),
                     (
+                        "load_l1.all_est_time_pct".to_string(),
+                        MetricValue::Number(100.0),
+                    ),
+                    (
                         "load_l1.vector_load.sample_pct".to_string(),
                         MetricValue::Number(60.0),
                     ),
@@ -2036,6 +2405,10 @@ mod tests {
                         "load_l1.vector_load.over_avg_all_est_time_pct".to_string(),
                         MetricValue::Number(45.0),
                     ),
+                    (
+                        "load_l1.vector_load.all_est_time_pct".to_string(),
+                        MetricValue::Number(12.5),
+                    ),
                 ]),
             )]),
             spe_hierarchical_cpu_histograms: BTreeMap::from([(
@@ -2064,6 +2437,10 @@ mod tests {
         assert!(rows.contains("data-spe-cpu=\"4\" data-spe-parent=\"load_l1\" data-spe-child=\"\""));
         assert!(rows.contains("data-spe-parent=\"load_l1\" data-spe-child=\"\""));
         assert!(rows.contains("data-spe-collapsible=\"true\" aria-expanded=\"false\""));
+        assert!(rows.contains("<td data-spe-column=\"cpu\">4</td>"));
+        assert!(rows.contains("<td data-spe-column=\"est_time_pct\">100.000%</td>"));
+        assert!(rows.contains("<td data-spe-column=\"all_est_time_pct\">100.000%</td>"));
+        assert!(rows.contains("<td data-spe-column=\"over_avg_all_est_time_pct\">35.000%</td>"));
         assert!(
             rows.contains("<span class=\"spe-collapse-indicator\">+</span><code>load_l1</code>")
         );
@@ -2074,6 +2451,7 @@ mod tests {
         assert!(rows.contains(
             "data-spe-child=\"vector_load\" onclick=\"renderSpeHierarchyHistogram(this)\" hidden"
         ));
+        assert!(rows.contains("<td data-spe-column=\"all_est_time_pct\">12.500%</td>"));
         assert!(rows.contains("onclick=\"renderSpeHierarchyHistogram(this)\""));
         assert!(rows.contains("class=\"spe-child-label\""));
 
@@ -2082,7 +2460,11 @@ mod tests {
 
         let html = fs::read_to_string(output).unwrap();
         assert!(html.contains("<summary>SPE Hierarchical Breakdown</summary>"));
+        assert!(html.contains("<summary>SPE Hierarchical Breakdown Columns</summary>"));
+        assert!(html.contains("id=\"speBreakdownColumnPicker\""));
         assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS ="));
+        assert!(html.contains("const SPE_BREAKDOWN_COLUMNS ="));
+        assert!(html.contains("toggleSpeBreakdownColumn"));
         assert!(html.contains("function toggleSpeHierarchyChildren(row)"));
         assert!(html.contains("function renderSpeHierarchyHistogram"));
         assert!(html.contains("childRow.hidden = !expanded;"));
@@ -2268,6 +2650,7 @@ mod tests {
         write_html_summary_from_model(&bundle, &model, &output).unwrap();
 
         let html = fs::read_to_string(output).unwrap();
-        assert!(html.contains("SPE captured a non-load/store/branch operation"));
+        assert!(html.contains("SPE 捕捉到非 load/store/branch 的操作"));
+        assert!(html.contains("目前尚未把 sampled PC 的 opcode 細分成 int"));
     }
 }

@@ -1577,6 +1577,17 @@ fn make_spe_hierarchy_metric_values(
             MetricValue::Number(est_time_pct)
         },
     );
+    values.insert(
+        format!("{name}.all_est_time_pct"),
+        if has_samples && !has_latency {
+            MetricValue::Missing("SPE latency field unavailable".to_string())
+        } else {
+            MetricValue::Number(percent(
+                aggregate.latency_cycles_sum as f64,
+                all_latency_cycles as f64,
+            ))
+        },
+    );
     values.extend(spe_category_latency_metric_values(
         name,
         Some(aggregate),
@@ -3640,6 +3651,14 @@ mod tests {
         assert!(matches!(
             metric_value_number(cpu_values.get("load_l1.scalar_load.over_avg_all_est_time_pct")),
             Some(value) if (value - 14.285714285714285).abs() < 0.000001
+        ));
+        assert_eq!(
+            metric_value_number(cpu_values.get("load_l1.scalar_load.est_time_pct")),
+            Some(40.0)
+        );
+        assert!(matches!(
+            metric_value_number(cpu_values.get("load_l1.scalar_load.all_est_time_pct")),
+            Some(value) if (value - 28.571428571428573).abs() < 0.000001
         ));
     }
 

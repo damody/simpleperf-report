@@ -125,7 +125,8 @@ pub fn write_html_summary_from_model(
     .spe-summary-table tbody tr[data-spe-parent] {{ cursor: pointer; }}
     .spe-child-label {{ padding-left: 24px; }}
     .spe-summary-table tbody tr.selected td {{ outline: 2px solid #2563eb; outline-offset: -2px; }}
-    .spe-histogram-panel {{ margin-top: 10px; border: 1px solid #d0d7de; padding: 10px; max-width: 920px; }}
+    .spe-histogram-panel {{ position: fixed; top: 0; left: 0; width: min(620px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; border: 1px solid #d0d7de; padding: 10px; background: #fff; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18); z-index: 20; border-radius: 4px; }}
+    .spe-histogram-panel[hidden] {{ display: none; }}
     .spe-histogram-title {{ font-weight: 600; margin-bottom: 8px; }}
     .spe-histogram-row {{ display: grid; grid-template-columns: 160px minmax(120px, 1fr) 64px; align-items: center; gap: 8px; margin: 4px 0; }}
     .spe-histogram-label {{ font-family: Consolas, monospace; font-size: 12px; }}
@@ -169,7 +170,7 @@ pub fn write_html_summary_from_model(
     <tr><th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th><th>&gt;p95 all est_time%</th><th>&gt;avg all est_time%</th></tr>
     {spe_hierarchy_summary_rows}
   </table>
-  <div id="speHierarchyHistogram" class="spe-histogram-panel">Select a SPE breakdown row to view latency histogram.</div>
+  <div id="speHierarchyHistogram" class="spe-histogram-panel" hidden></div>
   </details>
   <details class="report-section" open>
   <summary>Column Help</summary>
@@ -353,6 +354,29 @@ pub fn write_html_summary_from_model(
       sourceOffset = 0;
       renderSourceRows();
     }}
+    function positionSpeHierarchyHistogram(row) {{
+      const panel = document.getElementById("speHierarchyHistogram");
+      if (!panel || panel.hidden) return;
+      const margin = 12;
+      const gap = 10;
+      const rowRect = row.getBoundingClientRect();
+      const panelWidth = Math.min(620, window.innerWidth - margin * 2);
+      panel.style.width = `${{panelWidth}}px`;
+      let left = rowRect.right + gap;
+      if (left + panelWidth > window.innerWidth - margin) {{
+        left = Math.max(margin, rowRect.left - panelWidth - gap);
+      }}
+      if (left + panelWidth > window.innerWidth - margin) {{
+        left = Math.max(margin, window.innerWidth - panelWidth - margin);
+      }}
+      const panelHeight = Math.min(panel.scrollHeight, window.innerHeight - margin * 2);
+      let top = rowRect.top;
+      if (top + panelHeight > window.innerHeight - margin) {{
+        top = Math.max(margin, window.innerHeight - panelHeight - margin);
+      }}
+      panel.style.left = `${{left}}px`;
+      panel.style.top = `${{Math.max(margin, top)}}px`;
+    }}
     function renderSpeHierarchyHistogram(row) {{
       document.querySelectorAll(".spe-summary-table tr.selected").forEach(active => active.classList.remove("selected"));
       row.classList.add("selected");
@@ -365,6 +389,8 @@ pub fn write_html_summary_from_model(
       const panel = document.getElementById("speHierarchyHistogram");
       if (!histogram || !Array.isArray(histogram.bins) || histogram.bins.length === 0) {{
         panel.innerHTML = `<div class="spe-histogram-title">${{title}}</div><div>No latency histogram data</div>`;
+        panel.hidden = false;
+        positionSpeHierarchyHistogram(row);
         return;
       }}
       const maxCount = Math.max(...histogram.bins.map(bin => Number(bin.count) || 0), 1);
@@ -378,7 +404,17 @@ pub fn write_html_summary_from_model(
         return `<div class="spe-histogram-row"><div class="spe-histogram-label">${{start}}-${{end}}</div><div class="${{trackClass}}">${{bar}}</div><div class="spe-histogram-count">${{count}}</div></div>`;
       }}).join("");
       panel.innerHTML = `<div class="spe-histogram-title">${{title}} latency cycles histogram (${{histogram.count}} samples, min ${{formatMetric(histogram.min_latency_cycles)}}, max ${{formatMetric(histogram.max_latency_cycles)}})</div>${{rows}}`;
+      panel.hidden = false;
+      positionSpeHierarchyHistogram(row);
     }}
+    window.addEventListener("resize", () => {{
+      const row = document.querySelector(".spe-summary-table tr.selected");
+      if (row) positionSpeHierarchyHistogram(row);
+    }});
+    window.addEventListener("scroll", () => {{
+      const row = document.querySelector(".spe-summary-table tr.selected");
+      if (row) positionSpeHierarchyHistogram(row);
+    }}, true);
     function metricValue(row, key) {{
       return row.pmu_values?.[key] ?? row.spe_values?.[key] ?? row.instruction_values?.[key] ?? row.load_instruction_values?.[key] ?? "0";
     }}
@@ -1650,8 +1686,12 @@ mod tests {
         assert!(html.contains("<table class=\"spe-summary-table\">"));
         assert!(html.contains("<th>CPU</th><th>Category</th><th>sample%</th><th>est_time%</th><th>min_latency_cycles</th><th>max_latency_cycles</th><th>avg_latency_cycles</th><th>std_latency_cycles</th><th>p95_latency_cycles</th><th>p99_latency_cycles</th><th>&gt;p95 est_time%</th><th>&gt;avg est_time%</th><th>&gt;p95 all est_time%</th><th>&gt;avg all est_time%</th>"));
         assert!(html.contains("id=\"speHierarchyHistogram\""));
+        assert!(html.contains("class=\"spe-histogram-panel\" hidden"));
         assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS = "));
+        assert!(html.contains("function positionSpeHierarchyHistogram(row)"));
         assert!(html.contains("function renderSpeHierarchyHistogram"));
+        assert!(html.contains("position: fixed"));
+        assert!(html.contains("positionSpeHierarchyHistogram(row);"));
         assert!(html.contains("count > 0 ? Math.max(2, count / maxCount * 100) : 0"));
         assert!(html.contains("spe-histogram-bar-track empty"));
         assert!(!html.contains("<summary>SPE Category Summary</summary>"));

@@ -183,7 +183,7 @@ pub fn write_html_summary_from_model(
   </details>
   <table class="spe-summary-table">
     <thead>
-    <tr><th data-spe-column="cpu" data-spe-sort="cpu" onclick="sortSpeBreakdown('cpu')">CPU <span class="sort-indicator"></span></th><th data-spe-column="category" data-spe-sort="category" onclick="sortSpeBreakdown('category')">Category <span class="sort-indicator"></span></th><th data-spe-column="sample_pct" data-spe-sort="sample_pct" onclick="sortSpeBreakdown('sample_pct')">sample% <span class="sort-indicator"></span></th><th data-spe-column="est_time_pct" data-spe-sort="est_time_pct" onclick="sortSpeBreakdown('est_time_pct')">est_time% <span class="sort-indicator"></span></th><th data-spe-column="all_est_time_pct" data-spe-sort="all_est_time_pct" onclick="sortSpeBreakdown('all_est_time_pct')">all est_time% <span class="sort-indicator"></span></th><th data-spe-column="min_latency_cycles" data-spe-sort="min_latency_cycles" onclick="sortSpeBreakdown('min_latency_cycles')">min_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="max_latency_cycles" data-spe-sort="max_latency_cycles" onclick="sortSpeBreakdown('max_latency_cycles')">max_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="avg_latency_cycles" data-spe-sort="avg_latency_cycles" onclick="sortSpeBreakdown('avg_latency_cycles')">avg_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="std_latency_cycles" data-spe-sort="std_latency_cycles" onclick="sortSpeBreakdown('std_latency_cycles')">std_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="p95_latency_cycles" data-spe-sort="p95_latency_cycles" onclick="sortSpeBreakdown('p95_latency_cycles')">p95_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="p99_latency_cycles" data-spe-sort="p99_latency_cycles" onclick="sortSpeBreakdown('p99_latency_cycles')">p99_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="over_theory_sample_pct" data-spe-sort="over_theory_sample_pct" onclick="sortSpeBreakdown('over_theory_sample_pct')">&gt;theory sample% <span class="sort-indicator"></span></th><th data-spe-column="over_theory_est_time_pct" data-spe-sort="over_theory_est_time_pct" onclick="sortSpeBreakdown('over_theory_est_time_pct')">&gt;theory est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_p95_est_time_pct" data-spe-sort="over_p95_est_time_pct" onclick="sortSpeBreakdown('over_p95_est_time_pct')">&gt;p95 est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_avg_est_time_pct" data-spe-sort="over_avg_est_time_pct" onclick="sortSpeBreakdown('over_avg_est_time_pct')">&gt;avg est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_p95_all_est_time_pct" data-spe-sort="over_p95_all_est_time_pct" onclick="sortSpeBreakdown('over_p95_all_est_time_pct')">&gt;p95 all est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_avg_all_est_time_pct" data-spe-sort="over_avg_all_est_time_pct" onclick="sortSpeBreakdown('over_avg_all_est_time_pct')">&gt;avg all est_time% <span class="sort-indicator"></span></th></tr>
+    <tr><th data-spe-column="cpu" data-spe-sort="cpu" onclick="sortSpeBreakdown('cpu')">CPU <span class="sort-indicator"></span></th><th data-spe-column="category" data-spe-sort="category" onclick="sortSpeBreakdown('category')">Category <span class="sort-indicator"></span></th><th data-spe-column="sample_pct" data-spe-sort="sample_pct" onclick="sortSpeBreakdown('sample_pct')">sample% <span class="sort-indicator"></span></th><th data-spe-column="est_time_pct" data-spe-sort="est_time_pct" onclick="sortSpeBreakdown('est_time_pct')">est_time% <span class="sort-indicator"></span></th><th data-spe-column="all_est_time_pct" data-spe-sort="all_est_time_pct" onclick="sortSpeBreakdown('all_est_time_pct')">all est_time% <span class="sort-indicator"></span></th><th data-spe-column="min_latency_cycles" data-spe-sort="min_latency_cycles" onclick="sortSpeBreakdown('min_latency_cycles')">min_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="max_latency_cycles" data-spe-sort="max_latency_cycles" onclick="sortSpeBreakdown('max_latency_cycles')">max_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="avg_latency_cycles" data-spe-sort="avg_latency_cycles" onclick="sortSpeBreakdown('avg_latency_cycles')">avg_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="std_latency_cycles" data-spe-sort="std_latency_cycles" onclick="sortSpeBreakdown('std_latency_cycles')">std_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="p95_latency_cycles" data-spe-sort="p95_latency_cycles" onclick="sortSpeBreakdown('p95_latency_cycles')">p95_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="p99_latency_cycles" data-spe-sort="p99_latency_cycles" onclick="sortSpeBreakdown('p99_latency_cycles')">p99_latency_cycles <span class="sort-indicator"></span></th><th data-spe-column="over_p95_est_time_pct" data-spe-sort="over_p95_est_time_pct" onclick="sortSpeBreakdown('over_p95_est_time_pct')">&gt;p95 est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_avg_est_time_pct" data-spe-sort="over_avg_est_time_pct" onclick="sortSpeBreakdown('over_avg_est_time_pct')">&gt;avg est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_p95_all_est_time_pct" data-spe-sort="over_p95_all_est_time_pct" onclick="sortSpeBreakdown('over_p95_all_est_time_pct')">&gt;p95 all est_time% <span class="sort-indicator"></span></th><th data-spe-column="over_avg_all_est_time_pct" data-spe-sort="over_avg_all_est_time_pct" onclick="sortSpeBreakdown('over_avg_all_est_time_pct')">&gt;avg all est_time% <span class="sort-indicator"></span></th></tr>
     </thead>
     <tbody>
     {spe_hierarchy_summary_rows}
@@ -311,8 +311,6 @@ pub fn write_html_summary_from_model(
       {{ key: "std_latency_cycles", label: "std_latency_cycles" }},
       {{ key: "p95_latency_cycles", label: "p95_latency_cycles" }},
       {{ key: "p99_latency_cycles", label: "p99_latency_cycles" }},
-      {{ key: "over_theory_sample_pct", label: ">theory sample%" }},
-      {{ key: "over_theory_est_time_pct", label: ">theory est_time%" }},
       {{ key: "over_p95_est_time_pct", label: ">p95 est_time%" }},
       {{ key: "over_avg_est_time_pct", label: ">avg est_time%" }},
       {{ key: "over_p95_all_est_time_pct", label: ">p95 all est_time%" }},
@@ -986,12 +984,6 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         ("std_latency_cycles", "std_latency_cycles", false),
         ("p95_latency_cycles", "p95_latency_cycles", false),
         ("p99_latency_cycles", "p99_latency_cycles", false),
-        ("over_theory_sample_pct", "over_theory_sample_pct", false),
-        (
-            "over_theory_est_time_pct",
-            "over_theory_est_time_pct",
-            false,
-        ),
         ("over_p95_est_time_pct", "over_p95_est_time_pct", false),
         ("over_avg_est_time_pct", "over_avg_est_time_pct", false),
         (
@@ -1006,7 +998,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         ),
     ];
     if !spe_available {
-        return "<tr><td colspan=\"17\">SPE samples unavailable</td></tr>".to_string();
+        return "<tr><td colspan=\"15\">SPE samples unavailable</td></tr>".to_string();
     }
 
     let rows = model
@@ -1018,7 +1010,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                     .iter()
                     .map(|(_, metric, show_na)| {
                         let key = format!("{parent}.{metric}");
-                        summarize_spe_hierarchy_metric_from_values(values_by_key, &key, *show_na)
+                        summarize_spe_category_metric_from_values(values_by_key, &key, *show_na)
                     })
                     .collect::<Vec<_>>();
                 if parent_values
@@ -1048,7 +1040,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                             .iter()
                             .map(|(_, metric, show_na)| {
                                 let key = format!("{parent}.{child}.{metric}");
-                                    summarize_spe_hierarchy_metric_from_values(
+                                    summarize_spe_category_metric_from_values(
                                         values_by_key,
                                         &key,
                                         *show_na,
@@ -1107,7 +1099,7 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
-        return "<tr><td colspan=\"17\">No SPE hierarchy samples</td></tr>".to_string();
+        return "<tr><td colspan=\"15\">No SPE hierarchy samples</td></tr>".to_string();
     }
     rows.join("\n")
 }
@@ -1263,22 +1255,6 @@ fn summarize_spe_category_metric_from_values(
         None => "0".to_string(),
         Some(MetricValue::Undefined(_)) => "N/A".to_string(),
     }
-}
-
-fn summarize_spe_hierarchy_metric_from_values(
-    values: &BTreeMap<String, MetricValue>,
-    key: &str,
-    show_na_for_undefined: bool,
-) -> String {
-    if is_spe_theory_metric_key(key) && !values.contains_key(key) {
-        String::new()
-    } else {
-        summarize_spe_category_metric_from_values(values, key, show_na_for_undefined)
-    }
-}
-
-fn is_spe_theory_metric_key(key: &str) -> bool {
-    key.ends_with(".over_theory_sample_pct") || key.ends_with(".over_theory_est_time_pct")
 }
 
 fn format_metric_for_summary(key: &str, value: f64) -> String {
@@ -1568,16 +1544,6 @@ fn spe_hierarchical_breakdown_help_rows() -> Vec<String> {
             "SPE Hierarchical Breakdown: p99_latency_cycles",
             "nearest-rank p99 SPE latency cycles in this row",
             "此 row 的 p99 latency 門檻；描述最慢 1% 附近的延遲水準。它對樣本數較敏感，樣本很少時應視為方向性訊號。",
-        ),
-        help_row(
-            "SPE Hierarchical Breakdown: >theory sample%",
-            "samples where latency cycles > theoretical threshold / latency samples in this row",
-            "超過理論 latency 的 sample 數比例；目前只套用 load_l1=4T、load_l2=10T、load_l3=60T、store*=3T，其它分類留空。它描述超標事件發生頻率，不代表超標事件耗掉多少時間。",
-        ),
-        help_row(
-            "SPE Hierarchical Breakdown: >theory est_time%",
-            "latency cycles where latency cycles > theoretical threshold / row latency cycles",
-            "超過理論 latency 的 samples 所累積的 latency cycles，佔此 row 總 latency 的比例；目前只套用 load_l1=4T、load_l2=10T、load_l3=60T、store*=3T，其它分類留空。它比 sample% 更能看出超標事件是否真的吃掉主要等待時間。",
         ),
         help_row(
             "SPE Hierarchical Breakdown: >p95 est_time%",
@@ -2141,7 +2107,7 @@ mod tests {
         assert!(!html.contains("<summary>Load Instruction Summary</summary>"));
         assert!(!html.contains("<th>spe_latency%</th>"));
         assert!(!html.contains("pmu_cycles%"));
-        assert!(html.contains("<tr><td colspan=\"17\">SPE samples unavailable</td></tr>"));
+        assert!(html.contains("<tr><td colspan=\"15\">SPE samples unavailable</td></tr>"));
         assert!(!html.contains("<tr><td><code>cpu_instruction</code></td>"));
         assert!(
             html.contains("<details class=\"report-section\">\n  <summary>Column Help</summary>")
@@ -2158,8 +2124,6 @@ mod tests {
         assert!(html.contains("SPE Hierarchical Breakdown: sample%"));
         assert!(html.contains("SPE Hierarchical Breakdown: est_time%"));
         assert!(html.contains("SPE Hierarchical Breakdown: all est_time%"));
-        assert!(html.contains("SPE Hierarchical Breakdown: &gt;theory sample%"));
-        assert!(html.contains("load_l1=4T、load_l2=10T、load_l3=60T、store*=3T"));
         assert!(html.contains("子節點是 parent-relative"));
         assert!(html.contains("全域估算時間佔比"));
         assert!(html.contains("適合比較展開後哪個子項真正佔整體 latency"));
@@ -2412,7 +2376,7 @@ mod tests {
     }
 
     #[test]
-    fn spe_hierarchy_rows_hide_zero_rows_with_blank_theory_columns() {
+    fn spe_hierarchy_rows_hide_zero_rows() {
         let model = ReportModel {
             rows: Vec::new(),
             files: Vec::new(),
@@ -2452,14 +2416,6 @@ mod tests {
                     ),
                     (
                         "load_l3.p99_latency_cycles".to_string(),
-                        MetricValue::Number(0.0),
-                    ),
-                    (
-                        "load_l3.over_theory_sample_pct".to_string(),
-                        MetricValue::Number(0.0),
-                    ),
-                    (
-                        "load_l3.over_theory_est_time_pct".to_string(),
                         MetricValue::Number(0.0),
                     ),
                     (
@@ -2552,14 +2508,6 @@ mod tests {
                         MetricValue::Number(80.0),
                     ),
                     (
-                        "load_l1.over_theory_sample_pct".to_string(),
-                        MetricValue::Number(100.0),
-                    ),
-                    (
-                        "load_l1.over_theory_est_time_pct".to_string(),
-                        MetricValue::Number(100.0),
-                    ),
-                    (
                         "load_l1.over_p95_est_time_pct".to_string(),
                         MetricValue::Number(25.0),
                     ),
@@ -2610,14 +2558,6 @@ mod tests {
                     (
                         "load_l1.vector_load.p99_latency_cycles".to_string(),
                         MetricValue::Number(80.0),
-                    ),
-                    (
-                        "load_l1.vector_load.over_theory_sample_pct".to_string(),
-                        MetricValue::Number(50.0),
-                    ),
-                    (
-                        "load_l1.vector_load.over_theory_est_time_pct".to_string(),
-                        MetricValue::Number(55.0),
                     ),
                     (
                         "load_l1.vector_load.over_p95_est_time_pct".to_string(),
@@ -2674,8 +2614,6 @@ mod tests {
         assert!(rows.contains("<td data-spe-column=\"max_latency_cycles\">80</td>"));
         assert!(!rows.contains("<td data-spe-column=\"min_latency_cycles\">10.000</td>"));
         assert!(!rows.contains("<td data-spe-column=\"max_latency_cycles\">80.000</td>"));
-        assert!(rows.contains("<td data-spe-column=\"over_theory_sample_pct\">100.000%</td>"));
-        assert!(rows.contains("<td data-spe-column=\"over_theory_est_time_pct\">100.000%</td>"));
         assert!(rows.contains("<td data-spe-column=\"over_avg_all_est_time_pct\">35.000%</td>"));
         assert!(
             rows.contains("<span class=\"spe-collapse-indicator\">+</span><code>load_l1</code>")
@@ -2688,8 +2626,6 @@ mod tests {
             "data-spe-child=\"vector_load\" onclick=\"renderSpeHierarchyHistogram(this)\" hidden"
         ));
         assert!(rows.contains("<td data-spe-column=\"all_est_time_pct\">12.500%</td>"));
-        assert!(rows.contains("<td data-spe-column=\"over_theory_sample_pct\">50.000%</td>"));
-        assert!(rows.contains("<td data-spe-column=\"over_theory_est_time_pct\">55.000%</td>"));
         assert!(rows.contains("onclick=\"renderSpeHierarchyHistogram(this)\""));
         assert!(rows.contains("class=\"spe-child-label\""));
 

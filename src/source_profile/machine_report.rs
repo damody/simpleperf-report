@@ -299,7 +299,7 @@ fn callchain_to_values(row: &super::report_model::ReportCallchainRow) -> Vec<Str
     ]
 }
 
-fn spe_breakdown_columns() -> [&'static str; 19] {
+fn spe_breakdown_columns() -> [&'static str; 17] {
     [
         "CPU",
         "Parent",
@@ -314,8 +314,6 @@ fn spe_breakdown_columns() -> [&'static str; 19] {
         "std_latency_cycles",
         "p95_latency_cycles",
         "p99_latency_cycles",
-        ">theory sample%",
-        ">theory est_time%",
         ">p95 est_time%",
         ">avg est_time%",
         ">p95 all est_time%",
@@ -323,7 +321,7 @@ fn spe_breakdown_columns() -> [&'static str; 19] {
     ]
 }
 
-fn spe_breakdown_metrics() -> [&'static str; 15] {
+fn spe_breakdown_metrics() -> [&'static str; 13] {
     [
         "sample_pct",
         "est_time_pct",
@@ -334,8 +332,6 @@ fn spe_breakdown_metrics() -> [&'static str; 15] {
         "std_latency_cycles",
         "p95_latency_cycles",
         "p99_latency_cycles",
-        "over_theory_sample_pct",
-        "over_theory_est_time_pct",
         "over_p95_est_time_pct",
         "over_avg_est_time_pct",
         "over_p95_all_est_time_pct",
@@ -406,20 +402,9 @@ fn spe_breakdown_row(
     ];
     row.extend(metrics.iter().map(|metric| {
         let key = format!("{prefix}.{metric}");
-        if is_spe_theory_metric(metric) && !values_by_key.contains_key(&key) {
-            String::new()
-        } else {
-            metric_value_text(values_by_key.get(&key))
-        }
+        metric_value_text(values_by_key.get(&key))
     }));
     row
-}
-
-fn is_spe_theory_metric(metric: &str) -> bool {
-    matches!(
-        metric,
-        "over_theory_sample_pct" | "over_theory_est_time_pct"
-    )
 }
 
 fn metric_values_by_cpu_text(
@@ -520,8 +505,7 @@ mod tests {
         let csv = fs::read_to_string(out.join("csv/AllLines.csv")).unwrap();
         assert!(csv.contains("load_instruction.load_scalar_single.sample_pct"));
         let spe_csv = fs::read_to_string(out.join("csv/SPEBreakdown.csv")).unwrap();
-        assert!(spe_csv.contains("CPU,Parent,Child,Level,sample%,est_time%,all est_time%,min_latency_cycles,max_latency_cycles,avg_latency_cycles,std_latency_cycles,p95_latency_cycles,p99_latency_cycles,>theory sample%,>theory est_time%,>p95 est_time%,>avg est_time%,>p95 all est_time%,>avg all est_time%"));
-        assert!(spe_csv.contains("100,100,25,40"));
+        assert!(spe_csv.contains("CPU,Parent,Child,Level,sample%,est_time%,all est_time%,min_latency_cycles,max_latency_cycles,avg_latency_cycles,std_latency_cycles,p95_latency_cycles,p99_latency_cycles,>p95 est_time%,>avg est_time%,>p95 all est_time%,>avg all est_time%"));
         assert!(spe_csv.contains("4,load_l1,vector_load,child"));
     }
 
@@ -557,14 +541,6 @@ mod tests {
                 (
                     "load_l1.p99_latency_cycles".to_string(),
                     MetricValue::Number(80.0),
-                ),
-                (
-                    "load_l1.over_theory_sample_pct".to_string(),
-                    MetricValue::Number(100.0),
-                ),
-                (
-                    "load_l1.over_theory_est_time_pct".to_string(),
-                    MetricValue::Number(100.0),
                 ),
                 (
                     "load_l1.over_p95_est_time_pct".to_string(),
@@ -617,14 +593,6 @@ mod tests {
                 (
                     "load_l1.vector_load.p99_latency_cycles".to_string(),
                     MetricValue::Number(80.0),
-                ),
-                (
-                    "load_l1.vector_load.over_theory_sample_pct".to_string(),
-                    MetricValue::Number(50.0),
-                ),
-                (
-                    "load_l1.vector_load.over_theory_est_time_pct".to_string(),
-                    MetricValue::Number(55.0),
                 ),
                 (
                     "load_l1.vector_load.over_p95_est_time_pct".to_string(),

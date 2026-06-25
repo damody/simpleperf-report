@@ -1594,68 +1594,6 @@ fn make_spe_hierarchy_metric_values(
         Some(all_latency_cycles as f64),
         1.0,
     ));
-    values.extend(spe_hierarchy_theory_metric_values(
-        name,
-        aggregate,
-        has_samples,
-        has_latency,
-    ));
-    values
-}
-
-fn spe_hierarchy_theory_latency_cycles(name: &str) -> Option<u32> {
-    let parent = name.split('.').next().unwrap_or(name);
-    match parent {
-        "load_l1" => Some(4),
-        "load_l2" => Some(10),
-        "load_l3" => Some(60),
-        _ if parent.starts_with("store") => Some(3),
-        _ => None,
-    }
-}
-
-fn spe_hierarchy_theory_metric_values(
-    name: &str,
-    aggregate: &SpeCategoryAggregate,
-    has_samples: bool,
-    has_latency: bool,
-) -> BTreeMap<String, MetricValue> {
-    let mut values = BTreeMap::new();
-    let Some(threshold) = spe_hierarchy_theory_latency_cycles(name) else {
-        return values;
-    };
-    let missing_or_number = |value: f64| {
-        if has_samples && !has_latency {
-            MetricValue::Missing("SPE latency field unavailable".to_string())
-        } else {
-            MetricValue::Number(value)
-        }
-    };
-    let above_samples = aggregate
-        .latency_cycles_samples
-        .iter()
-        .filter(|latency| **latency > threshold)
-        .count() as f64;
-    let above_latency_cycles = aggregate
-        .latency_cycles_samples
-        .iter()
-        .filter(|latency| **latency > threshold)
-        .map(|latency| u64::from(*latency))
-        .sum::<u64>();
-    values.insert(
-        format!("{name}.over_theory_sample_pct"),
-        missing_or_number(percent(
-            above_samples,
-            aggregate.latency_sample_count as f64,
-        )),
-    );
-    values.insert(
-        format!("{name}.over_theory_est_time_pct"),
-        missing_or_number(percent(
-            above_latency_cycles as f64,
-            aggregate.latency_cycles_sum as f64,
-        )),
-    );
     values
 }
 
@@ -2544,8 +2482,10 @@ fn finalize_rows(
     rows.into_values()
         .map(|row| {
             let mut pmu_values = BTreeMap::new();
-            let dense_pmu_self_samples =
-                dense_supported_pmu_counts(&row.pmu_self_samples, &raw_pmu_keys, &event_support);
+            let line_sample_count = pmu_line_sample_count(&row);
+            let pmu_line_samples = pmu_line_samples_by_event(&row);
+            let dense_pmu_line_samples =
+                dense_supported_pmu_counts(&pmu_line_samples, &raw_pmu_keys, &event_support);
             for key in &raw_pmu_keys {
                 if !event_support.get(key.as_str()).copied().unwrap_or(false) {
                     pmu_values.insert(
@@ -2553,16 +2493,16 @@ fn finalize_rows(
                         MetricValue::Missing(format!("{key} is not available")),
                     );
                 } else {
-                    let sample_count = dense_pmu_self_samples.get(key).copied().unwrap_or(0);
-                    let ratio = if row.pmu_sample_count > 0 {
-                        sample_count as f64 / row.pmu_sample_count as f64
+                    let sample_count = dense_pmu_line_samples.get(key).copied().unwrap_or(0);
+                    let ratio = if line_sample_count > 0 {
+                        sample_count as f64 / line_sample_count as f64
                     } else {
                         0.0
                     };
                     pmu_values.insert(key.clone(), MetricValue::Number(ratio));
                 }
             }
-            for (key, value) in derive_pmu_metrics(&dense_pmu_self_samples, effective_seconds) {
+            for (key, value) in derive_pmu_metrics(&dense_pmu_line_samples, effective_seconds) {
                 pmu_values.insert(key, value);
             }
 
@@ -2621,7 +2561,7 @@ fn finalize_rows(
                 status,
                 cpu: join_numbers(&row.cpus),
                 thread: join_numbers(&row.tids),
-                sample_count: row.pmu_sample_count,
+                sample_count: line_sample_count,
                 self_weight,
                 accumulated_weight,
                 p_pct: 0.0,
@@ -2647,6 +2587,23 @@ fn pmu_self_weight(row: &MutableLineRow) -> u64 {
         .get("cpu_cycles")
         .copied()
         .unwrap_or_else(|| row.pmu_self.values().copied().sum())
+}
+
+fn pmu_line_sample_count(row: &MutableLineRow) -> u64 {
+    row.pmu_sample_count.saturating_add(
+        row.pmu_acc_samples
+            .values()
+            .copied()
+            .fold(0_u64, u64::saturating_add),
+    )
+}
+
+fn pmu_line_samples_by_event(row: &MutableLineRow) -> BTreeMap<String, u64> {
+    let mut samples = row.pmu_self_samples.clone();
+    for (event, value) in &row.pmu_acc_samples {
+        *samples.entry(event.clone()).or_default() += value;
+    }
+    samples
 }
 
 fn dense_supported_pmu_counts(
@@ -3466,6 +3423,47 @@ mod tests {
     }
 
     #[test]
+    fn source_line_samples_include_accumulated_pmu_samples() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let bundle =
+            SourceProfileBundle::load(root.join("fixtures/source_profile/minimal")).unwrap();
+        let row = MutableLineRow {
+            file: PathBuf::from("fixture.cpp"),
+            line: 1,
+            function: "tick".to_string(),
+            module: "libfixture.so".to_string(),
+            code: "Tick();".to_string(),
+            cpus: BTreeSet::from([0]),
+            tids: BTreeSet::from([42]),
+            pmu_self: BTreeMap::new(),
+            pmu_acc: BTreeMap::from([("cpu_cycles".to_string(), 3000)]),
+            pmu_self_samples: BTreeMap::new(),
+            pmu_acc_samples: BTreeMap::from([("cpu_cycles".to_string(), 3)]),
+            pmu_sample_count: 0,
+            spe: None,
+            spe_categories: BTreeMap::new(),
+            spe_cpu_categories: BTreeMap::new(),
+            instruction_classes: BTreeMap::new(),
+            instruction_cpu_classes: BTreeMap::new(),
+            load_instruction_kinds: BTreeMap::new(),
+            load_cpu_instruction_kinds: BTreeMap::new(),
+            unresolved: Vec::new(),
+        };
+
+        let rows = finalize_rows(
+            &bundle,
+            BTreeMap::from([((row.file.clone(), row.line), row)]),
+        );
+
+        assert_eq!(rows[0].sample_count, 3);
+        assert_eq!(rows[0].accumulated_weight, 3000.0);
+        assert!(matches!(
+            rows[0].pmu_values.get("cpu_cycles"),
+            Some(MetricValue::Number(value)) if (*value - 1.0).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
     fn computes_spe_category_percentages_and_est_time() {
         let mut by_category = BTreeMap::new();
         by_category.insert(
@@ -3742,51 +3740,6 @@ mod tests {
             metric_value_number(cpu_values.get("load_l1.scalar_load.all_est_time_pct")),
             Some(value) if (value - 28.571428571428573).abs() < 0.000001
         ));
-    }
-
-    #[test]
-    fn spe_hierarchy_theory_threshold_metrics_only_apply_to_configured_categories() {
-        let mut load_l1 = spe_hierarchy_parent(&[3, 4, 5, 10]);
-        spe_hierarchy_child(&mut load_l1, InstructionClass::ScalarLoad, &[4, 8]);
-        let store_unknown = spe_hierarchy_parent(&[3, 4]);
-        let branch_unknown = spe_hierarchy_parent(&[100]);
-
-        let values = make_spe_hierarchy_cpu_values_from_cpu_parents(&BTreeMap::from([(
-            4,
-            BTreeMap::from([
-                (SpeReportCategory::LoadL1, load_l1),
-                (SpeReportCategory::StoreUnknown, store_unknown),
-                (SpeReportCategory::BranchUnknown, branch_unknown),
-            ]),
-        )]));
-        let cpu_values = values.get(&4).expect("cpu 4 hierarchy values");
-
-        assert_eq!(
-            metric_value_number(cpu_values.get("load_l1.over_theory_sample_pct")),
-            Some(50.0)
-        );
-        assert!(matches!(
-            metric_value_number(cpu_values.get("load_l1.over_theory_est_time_pct")),
-            Some(value) if (value - (15.0 / 22.0 * 100.0)).abs() < 0.000001
-        ));
-        assert_eq!(
-            metric_value_number(cpu_values.get("load_l1.scalar_load.over_theory_sample_pct")),
-            Some(50.0)
-        );
-        assert_eq!(
-            metric_value_number(cpu_values.get("load_l1.scalar_load.over_theory_est_time_pct")),
-            Some(8.0 / 12.0 * 100.0)
-        );
-        assert_eq!(
-            metric_value_number(cpu_values.get("store_unknown.over_theory_sample_pct")),
-            Some(50.0)
-        );
-        assert_eq!(
-            metric_value_number(cpu_values.get("store_unknown.over_theory_est_time_pct")),
-            Some(4.0 / 7.0 * 100.0)
-        );
-        assert!(!cpu_values.contains_key("branch_unknown.over_theory_sample_pct"));
-        assert!(!cpu_values.contains_key("branch_unknown.over_theory_est_time_pct"));
     }
 
     #[test]

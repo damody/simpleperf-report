@@ -526,8 +526,6 @@ fn write_spe_breakdown_sheet(
         "std_latency_cycles",
         "p95_latency_cycles",
         "p99_latency_cycles",
-        ">theory sample%",
-        ">theory est_time%",
         ">p95 est_time%",
         ">avg est_time%",
         ">p95 all est_time%",
@@ -539,7 +537,7 @@ fn write_spe_breakdown_sheet(
         (headers.len() - 1) as u16,
         &[
             8.0, 24.0, 24.0, 10.0, 12.0, 12.0, 12.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 14.0,
-            14.0, 14.0, 14.0, 16.0, 16.0,
+            14.0, 16.0, 16.0,
         ],
     )?;
     for (col, header) in headers.iter().enumerate() {
@@ -556,8 +554,6 @@ fn write_spe_breakdown_sheet(
         "std_latency_cycles",
         "p95_latency_cycles",
         "p99_latency_cycles",
-        "over_theory_sample_pct",
-        "over_theory_est_time_pct",
         "over_p95_est_time_pct",
         "over_avg_est_time_pct",
         "over_p95_all_est_time_pct",
@@ -635,26 +631,15 @@ fn write_spe_breakdown_row(
     worksheet.write_string(row, 3, level)?;
     for (offset, metric) in metrics.iter().enumerate() {
         let key = format!("{prefix}.{metric}");
-        if is_spe_theory_metric(metric) && !values_by_key.contains_key(&key) {
-            worksheet.write_blank(row, (offset + 4) as u16, &styles.missing)?;
-        } else {
-            write_metric_cell(
-                worksheet,
-                row,
-                (offset + 4) as u16,
-                values_by_key.get(&key),
-                styles,
-            )?;
-        }
+        write_metric_cell(
+            worksheet,
+            row,
+            (offset + 4) as u16,
+            values_by_key.get(&key),
+            styles,
+        )?;
     }
     Ok(())
-}
-
-fn is_spe_theory_metric(metric: &str) -> bool {
-    matches!(
-        metric,
-        "over_theory_sample_pct" | "over_theory_est_time_pct"
-    )
 }
 
 fn write_metric_cell(

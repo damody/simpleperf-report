@@ -124,6 +124,7 @@ pub fn write_html_summary_from_model(
     .spe-summary-table tbody tr.cpu-shade-5 td {{ background: #fbf8ff; }}
     .spe-summary-table tbody tr[data-spe-parent] {{ cursor: pointer; }}
     .spe-child-label {{ padding-left: 24px; }}
+    .spe-collapse-indicator {{ display: inline-block; width: 14px; color: #57606a; font-weight: 600; }}
     .spe-summary-table tbody tr.selected td {{ outline: 2px solid #2563eb; outline-offset: -2px; }}
     .spe-histogram-panel {{ position: fixed; top: 0; left: 0; width: min(620px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow: auto; border: 1px solid #d0d7de; padding: 10px; background: #fff; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18); z-index: 20; border-radius: 4px; }}
     .spe-histogram-panel[hidden] {{ display: none; }}
@@ -354,6 +355,20 @@ pub fn write_html_summary_from_model(
       sourceOffset = 0;
       renderSourceRows();
     }}
+    function speHierarchyChildRows(cpu, parent) {{
+      return Array.from(document.querySelectorAll(".spe-summary-table tr[data-spe-child]"))
+        .filter(row => row.dataset.speCpu === cpu && row.dataset.speParent === parent && row.dataset.speChild);
+    }}
+    function toggleSpeHierarchyChildren(row) {{
+      if (row.dataset.speCollapsible !== "true" || row.dataset.speChild) return;
+      const expanded = row.getAttribute("aria-expanded") !== "true";
+      row.setAttribute("aria-expanded", expanded ? "true" : "false");
+      const indicator = row.querySelector(".spe-collapse-indicator");
+      if (indicator) indicator.textContent = expanded ? "-" : "+";
+      speHierarchyChildRows(row.dataset.speCpu, row.dataset.speParent).forEach(childRow => {{
+        childRow.hidden = !expanded;
+      }});
+    }}
     function positionSpeHierarchyHistogram(row) {{
       const panel = document.getElementById("speHierarchyHistogram");
       if (!panel || panel.hidden) return;
@@ -362,15 +377,9 @@ pub fn write_html_summary_from_model(
       const rowRect = row.getBoundingClientRect();
       const panelWidth = Math.min(620, window.innerWidth - margin * 2);
       panel.style.width = `${{panelWidth}}px`;
-      let left = rowRect.right + gap;
-      if (left + panelWidth > window.innerWidth - margin) {{
-        left = Math.max(margin, rowRect.left - panelWidth - gap);
-      }}
-      if (left + panelWidth > window.innerWidth - margin) {{
-        left = Math.max(margin, window.innerWidth - panelWidth - margin);
-      }}
+      const left = Math.max(margin, window.innerWidth - panelWidth - margin);
       const panelHeight = Math.min(panel.scrollHeight, window.innerHeight - margin * 2);
-      let top = rowRect.top;
+      let top = rowRect.bottom + gap;
       if (top + panelHeight > window.innerHeight - margin) {{
         top = Math.max(margin, window.innerHeight - panelHeight - margin);
       }}
@@ -380,6 +389,7 @@ pub fn write_html_summary_from_model(
     function renderSpeHierarchyHistogram(row) {{
       document.querySelectorAll(".spe-summary-table tr.selected").forEach(active => active.classList.remove("selected"));
       row.classList.add("selected");
+      toggleSpeHierarchyChildren(row);
       const cpu = row.dataset.speCpu;
       const parent = row.dataset.speParent;
       const child = row.dataset.speChild;
@@ -902,48 +912,60 @@ fn spe_hierarchy_summary_rows_html(model: &ReportModel, spe_available: bool) -> 
                     .map(|value| format!("<td>{}</td>", escape_html(&value)))
                     .collect::<Vec<_>>()
                     .join("");
+                let child_rows = INSTRUCTION_CLASS_NAMES
+                    .iter()
+                    .filter_map(|child| {
+                        let child_values = metrics
+                            .iter()
+                            .map(|(metric, show_na)| {
+                                let key = format!("{parent}.{child}.{metric}");
+                                summarize_spe_category_metric_from_values(
+                                    values_by_key,
+                                    &key,
+                                    *show_na,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if child_values
+                            .iter()
+                            .all(|value| is_zero_or_absent_summary(value))
+                        {
+                            return None;
+                        }
+                        let cells = child_values
+                            .into_iter()
+                            .map(|value| format!("<td>{}</td>", escape_html(&value)))
+                            .collect::<Vec<_>>()
+                            .join("");
+                        Some(format!(
+                            "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"{}\" onclick=\"renderSpeHierarchyHistogram(this)\" hidden><td>{}</td><td class=\"spe-child-label\"><code>{}</code></td>{}</tr>",
+                            cpu,
+                            escape_html(parent),
+                            escape_html(child),
+                            cpu,
+                            escape_html(child),
+                            cells
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                let indicator = if child_rows.is_empty() { "" } else { "+" };
+                let collapsible_attrs = if child_rows.is_empty() {
+                    String::new()
+                } else {
+                    " data-spe-collapsible=\"true\" aria-expanded=\"false\"".to_string()
+                };
                 let mut rows = vec![format!(
-                    "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"\" onclick=\"renderSpeHierarchyHistogram(this)\"><td>{}</td><td><code>{}</code></td>{}</tr>",
+                    "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"\"{} onclick=\"renderSpeHierarchyHistogram(this)\"><td>{}</td><td><span class=\"spe-collapse-indicator\">{}</span><code>{}</code></td>{}</tr>",
                     cpu,
                     escape_html(parent),
+                    collapsible_attrs,
                     cpu,
+                    indicator,
                     escape_html(parent),
                     parent_cells
                 )];
 
-                rows.extend(INSTRUCTION_CLASS_NAMES.iter().filter_map(move |child| {
-                    let child_values = metrics
-                        .iter()
-                        .map(|(metric, show_na)| {
-                            let key = format!("{parent}.{child}.{metric}");
-                            summarize_spe_category_metric_from_values(
-                                values_by_key,
-                                &key,
-                                *show_na,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    if child_values
-                        .iter()
-                        .all(|value| is_zero_or_absent_summary(value))
-                    {
-                        return None;
-                    }
-                    let cells = child_values
-                        .into_iter()
-                        .map(|value| format!("<td>{}</td>", escape_html(&value)))
-                        .collect::<Vec<_>>()
-                        .join("");
-                    Some(format!(
-                        "<tr class=\"cpu-shade-{row_shade}\" data-spe-cpu=\"{}\" data-spe-parent=\"{}\" data-spe-child=\"{}\" onclick=\"renderSpeHierarchyHistogram(this)\"><td>{}</td><td class=\"spe-child-label\"><code>{}</code></td>{}</tr>",
-                        cpu,
-                        escape_html(parent),
-                        escape_html(child),
-                        cpu,
-                        escape_html(child),
-                        cells
-                    ))
-                }));
+                rows.extend(child_rows);
                 rows
             })
         })
@@ -1691,6 +1713,8 @@ mod tests {
         assert!(html.contains("function positionSpeHierarchyHistogram(row)"));
         assert!(html.contains("function renderSpeHierarchyHistogram"));
         assert!(html.contains("position: fixed"));
+        assert!(html.contains("window.innerWidth - panelWidth - margin"));
+        assert!(html.contains("let top = rowRect.bottom + gap;"));
         assert!(html.contains("positionSpeHierarchyHistogram(row);"));
         assert!(html.contains("count > 0 ? Math.max(2, count / maxCount * 100) : 0"));
         assert!(html.contains("spe-histogram-bar-track empty"));
@@ -2039,10 +2063,17 @@ mod tests {
 
         assert!(rows.contains("data-spe-cpu=\"4\" data-spe-parent=\"load_l1\" data-spe-child=\"\""));
         assert!(rows.contains("data-spe-parent=\"load_l1\" data-spe-child=\"\""));
+        assert!(rows.contains("data-spe-collapsible=\"true\" aria-expanded=\"false\""));
+        assert!(
+            rows.contains("<span class=\"spe-collapse-indicator\">+</span><code>load_l1</code>")
+        );
         assert!(rows.contains(
             "data-spe-cpu=\"4\" data-spe-parent=\"load_l1\" data-spe-child=\"vector_load\""
         ));
         assert!(rows.contains("data-spe-parent=\"load_l1\" data-spe-child=\"vector_load\""));
+        assert!(rows.contains(
+            "data-spe-child=\"vector_load\" onclick=\"renderSpeHierarchyHistogram(this)\" hidden"
+        ));
         assert!(rows.contains("onclick=\"renderSpeHierarchyHistogram(this)\""));
         assert!(rows.contains("class=\"spe-child-label\""));
 
@@ -2052,7 +2083,9 @@ mod tests {
         let html = fs::read_to_string(output).unwrap();
         assert!(html.contains("<summary>SPE Hierarchical Breakdown</summary>"));
         assert!(html.contains("const SPE_HIERARCHY_HISTOGRAMS ="));
+        assert!(html.contains("function toggleSpeHierarchyChildren(row)"));
         assert!(html.contains("function renderSpeHierarchyHistogram"));
+        assert!(html.contains("childRow.hidden = !expanded;"));
         assert!(html.contains(r#"const key = child ? `${parent}.${child}` : parent;"#));
         assert!(html.contains("SPE_HIERARCHY_HISTOGRAMS?.[cpu]?.[key]"));
     }

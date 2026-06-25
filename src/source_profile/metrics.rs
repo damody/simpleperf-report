@@ -979,79 +979,9 @@ pub fn hierarchy_child_class(
     class: InstructionClass,
 ) -> InstructionClass {
     match parent {
-        SpeReportCategory::LoadL1
-        | SpeReportCategory::LoadL2
-        | SpeReportCategory::LoadL3
-        | SpeReportCategory::LoadLlc
-        | SpeReportCategory::LoadPeerCore
-        | SpeReportCategory::LoadPeerCluster
-        | SpeReportCategory::LoadSystemCache
-        | SpeReportCategory::LoadDram
-        | SpeReportCategory::LoadRemote
-        | SpeReportCategory::LoadIo
-        | SpeReportCategory::LoadUnknown => match class {
-            InstructionClass::ScalarLoad
-            | InstructionClass::VectorLoad
-            | InstructionClass::Atomic
-            | InstructionClass::AcquireRelease
-            | InstructionClass::Prefetch
-            | InstructionClass::MissingInstruction
-            | InstructionClass::UnknownInstruction => class,
-            _ => InstructionClass::UnknownInstruction,
-        },
-        SpeReportCategory::StoreL1
-        | SpeReportCategory::StoreL2
-        | SpeReportCategory::StoreL3
-        | SpeReportCategory::StoreLlc
-        | SpeReportCategory::StorePeerCore
-        | SpeReportCategory::StorePeerCluster
-        | SpeReportCategory::StoreSystemCache
-        | SpeReportCategory::StoreDram
-        | SpeReportCategory::StoreRemote
-        | SpeReportCategory::StoreIo
-        | SpeReportCategory::StoreUnknown => match class {
-            InstructionClass::ScalarStore
-            | InstructionClass::VectorStore
-            | InstructionClass::Atomic
-            | InstructionClass::AcquireRelease
-            | InstructionClass::MissingInstruction
-            | InstructionClass::UnknownInstruction => class,
-            _ => InstructionClass::UnknownInstruction,
-        },
-        SpeReportCategory::AtomicL1
-        | SpeReportCategory::AtomicL2
-        | SpeReportCategory::AtomicL3
-        | SpeReportCategory::AtomicPeerCore
-        | SpeReportCategory::AtomicPeerCluster
-        | SpeReportCategory::AtomicSystemCache
-        | SpeReportCategory::AtomicDram
-        | SpeReportCategory::AtomicRemote
-        | SpeReportCategory::AtomicUnknown => match class {
-            InstructionClass::Atomic
-            | InstructionClass::AcquireRelease
-            | InstructionClass::ScalarLoad
-            | InstructionClass::ScalarStore
-            | InstructionClass::MissingInstruction
-            | InstructionClass::UnknownInstruction => class,
-            _ => InstructionClass::UnknownInstruction,
-        },
-        SpeReportCategory::BranchHit
-        | SpeReportCategory::BranchMiss
-        | SpeReportCategory::BranchUnknown => match class {
-            InstructionClass::Branch
-            | InstructionClass::MissingInstruction
-            | InstructionClass::UnknownInstruction => class,
-            _ => InstructionClass::UnknownInstruction,
-        },
-        SpeReportCategory::ComputeUnknown => match class {
-            InstructionClass::ComputeInt
-            | InstructionClass::ComputeFpSimd
-            | InstructionClass::ComputeCrypto
-            | InstructionClass::SystemInstruction
-            | InstructionClass::MissingInstruction
-            | InstructionClass::UnknownInstruction => class,
-            _ => InstructionClass::UnknownInstruction,
-        },
+        SpeReportCategory::DecodeUnknown | SpeReportCategory::OtherUnknown => {
+            InstructionClass::UnknownInstruction
+        }
         _ => class,
     }
 }
@@ -1643,6 +1573,50 @@ mod tests {
         assert_eq!(
             load_l2.children[&InstructionClass::VectorLoad].latency_cycles_sum,
             30
+        );
+    }
+
+    #[test]
+    fn spe_hierarchy_keeps_decoded_child_when_parent_operation_differs() {
+        let samples = vec![
+            spe_test_sample(4, 0x1000, SPE_OP_LOAD, 0x00, Some(10)),
+            spe_test_sample(4, 0x1004, SPE_OP_STORE, u16::MAX, Some(20)),
+            spe_test_sample(4, 0x1008, SPE_OP_BRANCH, 0, Some(30)),
+            spe_test_sample(4, 0x100c, 0, 0, Some(40)),
+        ];
+
+        let rows = aggregate_spe_hierarchy_by_address(&samples, |sample| match sample.pc {
+            0x1000 => InstructionClass::ComputeInt,
+            0x1004 => InstructionClass::VectorLoad,
+            0x1008 => InstructionClass::ScalarLoad,
+            0x100c => InstructionClass::ScalarLoad,
+            _ => InstructionClass::MissingInstruction,
+        });
+
+        let cpu_rows = hierarchy_by_cpu_from_address_aggregates(&rows);
+        let cpu4 = cpu_rows.get(&4).unwrap();
+
+        assert_eq!(
+            cpu4[&SpeReportCategory::LoadL1].children[&InstructionClass::ComputeInt].sample_count,
+            1
+        );
+        assert_eq!(
+            cpu4[&SpeReportCategory::StoreUnknown].children[&InstructionClass::VectorLoad]
+                .sample_count,
+            1
+        );
+        assert_eq!(
+            cpu4[&SpeReportCategory::BranchUnknown].children[&InstructionClass::ScalarLoad]
+                .sample_count,
+            1
+        );
+        assert!(!cpu4[&SpeReportCategory::LoadL1]
+            .children
+            .contains_key(&InstructionClass::UnknownInstruction));
+        assert_eq!(
+            cpu4[&SpeReportCategory::OtherUnknown].children[&InstructionClass::UnknownInstruction]
+                .sample_count,
+            1
         );
     }
 
